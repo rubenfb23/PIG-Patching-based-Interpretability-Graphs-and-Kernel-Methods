@@ -66,3 +66,5 @@ See [LICENSE](LICENSE).
 ## Acknowledgments
 
 This work is tutored by David Olivieri from University of Vigo.
+
+Ruben Fernandez-Boullon
