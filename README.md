@@ -1,4 +1,4 @@
-# PIG - Patching-based Interpretability Graphs (PIG)
+# Patching-based Interpretability Graphs (PIG)
 
 1) generate a large *interventional* dataset via activation patching,
 2) summarize patch effects as a *dataset of sparse graphs* (one graph per “slice” of prompts/corruptions), and
