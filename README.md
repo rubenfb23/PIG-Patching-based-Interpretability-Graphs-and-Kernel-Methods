@@ -111,23 +111,30 @@ src/pig/
 ## Core Concepts
 
 ### Paired Inputs
+
 For each example, create `(x_clean, x_corrupt)` where the corruption breaks the target behavior:
+
 ```python
 # Clean: "John gave the book to Mary. Mary gave it back to" → predict "John"
 # Corrupt: "Mary gave the book to Mary. Mary gave it back to" → predict "Mary"
 ```
 
 ### Patch Effect
+
 The causal effect of patching node `u = (layer, token)`:
+
 ```
 E_u = O(patched_forward(x_corrupt; u)) - O(forward(x_corrupt))
 ```
+
 where `O` is the observable (target token logit).
 
 ### Slices
+
 Groups of examples by task family, corruption type, or difficulty. Each slice produces one graph.
 
 ### Graph Construction
+
 - **Nodes**: Fixed set of `(layer, token)` positions
 - **Edges**: Correlation of effect profiles within a slice
 - **Direction**: Edges only from earlier to later positions
@@ -136,6 +143,7 @@ Groups of examples by task family, corruption type, or difficulty. Each slice pr
 ## Modules
 
 ### `pig.model` - Model Setup
+
 ```python
 from pig.model import HookedModel
 
@@ -154,6 +162,7 @@ patched = model.patched_score(
 ```
 
 ### `pig.prompts` - Prompt Generation
+
 ```python
 from pig.prompts import IOIGenerator, create_ioi_dataset
 
@@ -169,6 +178,7 @@ dataset = create_ioi_dataset(n_examples=100, corruption="name_swap")
 ```
 
 ### `pig.patching` - Effect Computation
+
 ```python
 from pig.patching import compute_patch_effects, PatchEffectComputer
 
@@ -186,6 +196,7 @@ for tensor in dataset:
 ```
 
 ### `pig.graph` - Graph Construction
+
 ```python
 from pig.graph import GraphBuilder
 
@@ -199,6 +210,7 @@ graphs_with_labels = builder.build_per_example(dataset)
 ```
 
 ### `pig.embeddings` - WL Features
+
 ```python
 from pig.embeddings import compute_wl_features, WLEncoder
 
@@ -212,6 +224,7 @@ features = compute_wl_features_from_list(graphs_with_labels, depth=3)
 ```
 
 ### `pig.kernels` - Classification
+
 ```python
 from pig.kernels import ClassicalKernelClassifier, train_classical_baseline
 
