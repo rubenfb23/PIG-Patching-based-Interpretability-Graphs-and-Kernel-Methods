@@ -13,29 +13,74 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
 
-from pig.model import HookedModel
+from pig.model import (
+    NODE_TYPE_ATT,
+    NODE_TYPE_MLP,
+    NODE_TYPE_RES,
+    ALLOWED_NODE_TYPES,
+    HookedModel,
+)
 from pig.prompts import PromptPair, SliceLabel
+
+
+@dataclass(frozen=True)
+class ComponentSpec:
+    """Component spec for a per-token patch node axis."""
+
+    node_type: str
+    head: Optional[int] = None
+
+    def to_dict(self) -> dict:
+        return {"type": self.node_type, "head": self.head}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ComponentSpec":
+        return cls(node_type=data["type"], head=data.get("head"))
+
+
+def build_component_axis(
+    node_types: Sequence[str], num_heads: int
+) -> list[ComponentSpec]:
+    """Build a component axis list for patching."""
+    node_type_set = set(node_types)
+    invalid = node_type_set - ALLOWED_NODE_TYPES
+    if invalid:
+        raise ValueError(f"Unsupported node types: {sorted(invalid)}")
+    if not node_type_set:
+        raise ValueError("node_types must include at least one component")
+
+    axis: list[ComponentSpec] = []
+    if NODE_TYPE_ATT in node_type_set:
+        for head in range(num_heads):
+            axis.append(ComponentSpec(node_type=NODE_TYPE_ATT, head=head))
+    if NODE_TYPE_MLP in node_type_set:
+        axis.append(ComponentSpec(node_type=NODE_TYPE_MLP))
+    if NODE_TYPE_RES in node_type_set:
+        axis.append(ComponentSpec(node_type=NODE_TYPE_RES))
+    return axis
 
 
 @dataclass
 class PatchEffectTensor:
     """Dense tensor of patch effects for a single example.
 
-    Stores E_u for all nodes u = (layer, token) in a dense matrix.
+    Stores E_u for all nodes u = (layer, token, component) in a dense tensor.
 
     Attributes:
-        effects: Dense matrix of shape [num_layers, num_tokens]
+        effects: Dense tensor of shape [num_layers, num_tokens, num_components]
+        component_axis: Component spec list shared across all tensors
         prompt_pair: The original prompt pair used
         base_score: The baseline score O(x^crp) before patching
         clean_score: The clean score O(x^cln)
     """
 
     effects: NDArray[np.float32]
+    component_axis: list[ComponentSpec]
     prompt_pair: PromptPair
     base_score: float
     clean_score: float
@@ -49,33 +94,53 @@ class PatchEffectTensor:
         return self.effects.shape[1]
 
     @property
-    def shape(self) -> tuple[int, int]:
+    def num_components(self) -> int:
+        return self.effects.shape[2]
+
+    @property
+    def shape(self) -> tuple[int, int, int]:
         return self.effects.shape
 
-    def get_effect(self, layer: int, token: int) -> float:
-        """Get the patch effect at a specific (layer, token) position."""
-        return float(self.effects[layer, token])
+    def component_index(
+        self, node_type: str, head: Optional[int] = None
+    ) -> int:
+        """Get the component axis index for a node type and head."""
+        for idx, spec in enumerate(self.component_axis):
+            if spec.node_type == node_type and spec.head == head:
+                return idx
+        raise ValueError(
+            f"Component not found: type={node_type}, head={head}"
+        )
+
+    def get_effect(self, layer: int, token: int, component_idx: int = 0) -> float:
+        """Get the patch effect at a specific (layer, token, component)."""
+        return float(self.effects[layer, token, component_idx])
 
     def get_significant_positions(
         self, threshold: float = 0.1
-    ) -> list[tuple[int, int, float]]:
+    ) -> list[tuple[int, int, int, float]]:
         """Get positions with |effect| above threshold.
 
         Returns:
-            List of (layer, token, effect) tuples sorted by |effect|.
+            List of (layer, token, component_idx, effect) tuples
+            sorted by |effect|.
         """
         positions = []
         for layer in range(self.num_layers):
             for token in range(self.num_tokens):
-                effect = self.effects[layer, token]
-                if abs(effect) > threshold:
-                    positions.append((layer, token, float(effect)))
-        return sorted(positions, key=lambda x: abs(x[2]), reverse=True)
+                for comp_idx in range(self.num_components):
+                    effect = self.effects[layer, token, comp_idx]
+                    if abs(effect) > threshold:
+                        positions.append(
+                            (layer, token, comp_idx, float(effect))
+                        )
+        return sorted(positions, key=lambda x: abs(x[3]), reverse=True)
 
     def to_dict(self) -> dict:
         """Serialize to dictionary for caching."""
         return {
             "effects": self.effects.tolist(),
+            "component_axis": [c.to_dict() for c in self.component_axis],
             "prompt_pair": self.prompt_pair.to_dict(),
             "base_score": self.base_score,
             "clean_score": self.clean_score,
@@ -100,6 +165,12 @@ class PatchEffectTensor:
         )
         return cls(
             effects=np.array(data["effects"], dtype=np.float32),
+            component_axis=[
+                ComponentSpec.from_dict(c)
+                for c in data.get(
+                    "component_axis", [{"type": NODE_TYPE_RES, "head": None}]
+                )
+            ],
             prompt_pair=prompt_pair,
             base_score=data["base_score"],
             clean_score=data["clean_score"],
@@ -117,6 +188,10 @@ class PatchEffectDataset:
 
     def add(self, tensor: PatchEffectTensor) -> None:
         """Add a tensor to the dataset."""
+        if self.tensors:
+            expected = self.tensors[0].component_axis
+            if tensor.component_axis != expected:
+                raise ValueError("Inconsistent component_axis in dataset")
         self.tensors.append(tensor)
 
     def __len__(self) -> int:
@@ -147,7 +222,7 @@ class PatchEffectDataset:
                        If None, uses the minimum token count in the slice.
 
         Returns:
-            Matrix of shape [num_examples, num_layers * max_tokens]
+            Matrix of shape [num_examples, num_layers * max_tokens * num_components]
         """
         tensors = self.get_by_slice(slice_label)
         if not tensors:
@@ -160,15 +235,15 @@ class PatchEffectDataset:
         # Truncate each tensor to max_tokens and flatten
         flattened = []
         for t in tensors:
-            truncated = t.effects[:, :max_tokens]
-            flattened.append(truncated.flatten())
+            truncated = t.effects[:, :max_tokens, :]
+            flattened.append(truncated.reshape(-1))
 
         return np.stack(flattened, axis=0)
 
     def get_common_dimensions(
         self, slice_label: SliceLabel
-    ) -> tuple[int, int]:
-        """Get the common (num_layers, min_tokens) for a slice.
+    ) -> tuple[int, int, int]:
+        """Get the common (num_layers, min_tokens, num_components) for a slice.
 
         Returns dimensions that work for all examples in the slice.
         """
@@ -178,15 +253,24 @@ class PatchEffectDataset:
 
         num_layers = tensors[0].num_layers
         min_tokens = min(t.num_tokens for t in tensors)
+        num_components = tensors[0].num_components
 
-        return num_layers, min_tokens
+        return num_layers, min_tokens, num_components
+
+    def get_component_axis(self) -> list[ComponentSpec]:
+        """Return the shared component axis for the dataset."""
+        if not self.tensors:
+            return []
+        return self.tensors[0].component_axis
 
     def compute_statistics(self) -> dict:
         """Compute summary statistics for the dataset."""
         if not self.tensors:
             return {}
 
-        all_effects = np.concatenate([t.effects.flatten() for t in self.tensors])
+        all_effects = np.concatenate(
+            [t.effects.reshape(-1) for t in self.tensors]
+        )
 
         stats = {
             "num_examples": len(self.tensors),
@@ -218,7 +302,12 @@ class PatchEffectCache:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def _compute_key(self, prompt_pair: PromptPair, model_name: str) -> str:
+    def _compute_key(
+        self,
+        prompt_pair: PromptPair,
+        model_name: str,
+        component_axis: Optional[Sequence[ComponentSpec]],
+    ) -> str:
         """Compute a unique cache key for a prompt pair."""
         content = json.dumps({
             "x_cln": prompt_pair.x_cln,
@@ -226,14 +315,20 @@ class PatchEffectCache:
             "y_star": prompt_pair.y_star,
             "slice": str(prompt_pair.slice_label),
             "model": model_name,
+            "components": [
+                c.to_dict() for c in component_axis
+            ] if component_axis is not None else None,
         }, sort_keys=True)
         return hashlib.sha256(content.encode()).hexdigest()[:16]
 
     def get(
-        self, prompt_pair: PromptPair, model_name: str
+        self,
+        prompt_pair: PromptPair,
+        model_name: str,
+        component_axis: Optional[Sequence[ComponentSpec]] = None,
     ) -> Optional[PatchEffectTensor]:
         """Retrieve a cached tensor if it exists."""
-        key = self._compute_key(prompt_pair, model_name)
+        key = self._compute_key(prompt_pair, model_name, component_axis)
         cache_path = self.cache_dir / f"{key}.json"
 
         if cache_path.exists():
@@ -246,7 +341,9 @@ class PatchEffectCache:
         self, tensor: PatchEffectTensor, model_name: str
     ) -> None:
         """Store a tensor in the cache."""
-        key = self._compute_key(tensor.prompt_pair, model_name)
+        key = self._compute_key(
+            tensor.prompt_pair, model_name, tensor.component_axis
+        )
         cache_path = self.cache_dir / f"{key}.json"
 
         with open(cache_path, "w") as f:
@@ -273,6 +370,7 @@ class PatchEffectComputer:
         model: HookedModel,
         cache: Optional[PatchEffectCache] = None,
         progress_callback: Optional[Callable[[int, int], None]] = None,
+        node_types: Optional[Sequence[str]] = None,
     ):
         """Initialize the computer.
 
@@ -284,6 +382,12 @@ class PatchEffectComputer:
         self.model = model
         self.cache = cache
         self.progress_callback = progress_callback
+        self.node_types = tuple(node_types) if node_types is not None else (
+            NODE_TYPE_RES,
+        )
+        self.component_axis = build_component_axis(
+            self.node_types, self.model.n_heads
+        )
 
     def compute_single(self, prompt_pair: PromptPair) -> PatchEffectTensor:
         """Compute patch-effect tensor for a single example.
@@ -292,16 +396,22 @@ class PatchEffectComputer:
             prompt_pair: The clean/corrupted prompt pair
 
         Returns:
-            PatchEffectTensor with effects for all (layer, token) positions
+            PatchEffectTensor with effects for all (layer, token, component) positions
         """
         # Check cache first
         if self.cache is not None:
-            cached = self.cache.get(prompt_pair, self.model.model_name)
+            cached = self.cache.get(
+                prompt_pair,
+                self.model.model_name,
+                self.component_axis,
+            )
             if cached is not None:
                 return cached
 
         # Cache clean activations
-        clean_cache = self.model.cache_clean(prompt_pair.x_cln)
+        clean_cache = self.model.cache_clean_components(
+            prompt_pair.x_cln, node_types=self.node_types
+        )
 
         # Compute baseline scores
         clean_score = self.model.score(prompt_pair.x_cln, prompt_pair.y_star)
@@ -312,20 +422,31 @@ class PatchEffectComputer:
         num_tokens = self.model.get_num_tokens(prompt_pair.x_crp)
 
         # Compute effects for all positions
-        effects = np.zeros((num_layers, num_tokens), dtype=np.float32)
+        num_components = len(self.component_axis)
+        effects = np.zeros(
+            (num_layers, num_tokens, num_components), dtype=np.float32
+        )
 
         for layer in range(num_layers):
             for token in range(num_tokens):
-                patched_score = self.model.patched_score(
-                    prompt_pair.x_crp,
-                    prompt_pair.y_star,
-                    clean_cache,
-                    (layer, token),
-                )
-                effects[layer, token] = patched_score - base_score
+                for comp_idx, comp in enumerate(self.component_axis):
+                    if comp.node_type == NODE_TYPE_ATT:
+                        patch_node = (layer, token, NODE_TYPE_ATT, comp.head)
+                    else:
+                        patch_node = (layer, token, comp.node_type)
+                    patched_score = self.model.patched_score(
+                        prompt_pair.x_crp,
+                        prompt_pair.y_star,
+                        clean_cache,
+                        patch_node,
+                    )
+                    effects[layer, token, comp_idx] = (
+                        patched_score - base_score
+                    )
 
         tensor = PatchEffectTensor(
             effects=effects,
+            component_axis=self.component_axis,
             prompt_pair=prompt_pair,
             base_score=base_score,
             clean_score=clean_score,
@@ -365,6 +486,7 @@ def compute_patch_effects(
     prompt_pairs: list[PromptPair],
     cache_dir: Optional[str] = None,
     show_progress: bool = True,
+    node_types: Optional[Sequence[str]] = None,
 ) -> PatchEffectDataset:
     """Convenience function to compute patch effects for a list of prompts.
 
@@ -373,6 +495,7 @@ def compute_patch_effects(
         prompt_pairs: List of prompt pairs to process
         cache_dir: Optional cache directory (None to disable caching)
         show_progress: Whether to print progress
+        node_types: Iterable of component types ("res", "mlp", "att")
 
     Returns:
         PatchEffectDataset with all computed tensors
@@ -383,7 +506,12 @@ def compute_patch_effects(
         if show_progress:
             print(f"\r  Computing patch effects: {current}/{total}", end="")
 
-    computer = PatchEffectComputer(model, cache, progress_callback)
+    computer = PatchEffectComputer(
+        model,
+        cache,
+        progress_callback,
+        node_types=node_types,
+    )
     dataset = computer.compute_batch(prompt_pairs)
 
     if show_progress:
