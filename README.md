@@ -14,7 +14,7 @@ A Python framework for mechanistic interpretability that:
 | 2 | Patching Engine | ✅ Complete |
 | 3 | Graph Construction | ✅ Complete |
 | 4 | Classical Kernels | ✅ Complete |
-| 5 | Quantum Kernels | 🚧 Planned |
+| 5 | Quantum Kernels | ✅ Complete |
 | 6 | Evaluation & Ablations | 🚧 Planned |
 | 7 | Packaging & Reproducibility | 🟡 Partial |
 
@@ -88,6 +88,10 @@ python scripts/validate_story_3_1.py  # Graph construction
 # Phase 4: Classical Kernels
 python scripts/validate_story_4_1.py  # WL embeddings
 python scripts/validate_story_4_2.py  # Classical baseline
+
+# Phase 5: Quantum Kernels
+python scripts/validate_story_5_1.py  # Quantum feature map
+python scripts/validate_story_5_2.py  # Quantum fidelity kernel
 ```
 
 ### Running Tests
@@ -105,7 +109,8 @@ src/pig/
 ├── patching.py    # Patch-effect tensor computation & caching
 ├── graph.py       # Graph construction from effects
 ├── embeddings.py  # Weisfeiler-Lehman graph embeddings
-└── kernels.py     # Classical SVM classifiers (linear, RBF)
+├── kernels.py     # Classical SVM classifiers (linear, RBF)
+└── quantum.py     # Quantum feature maps + fidelity kernels
 ```
 
 ## Core Concepts
@@ -238,6 +243,30 @@ predictions = clf.predict(X_test)
 result = clf.evaluate(X_test, y_test)
 ```
 
+### `pig.quantum` - Quantum Kernels
+
+```python
+from pig.quantum import compute_quantum_kernel_matrix, train_quantum_kernel_baseline
+
+# Compute a quantum kernel matrix from WL features
+K, reducer = compute_quantum_kernel_matrix(
+    features,
+    n_qubits=4,
+    depth=2,
+    shots=500,
+    reduction="pca",
+)
+
+# Train an SVM with the precomputed quantum kernel
+clf, cv_results, _ = train_quantum_kernel_baseline(
+    features,
+    n_qubits=4,
+    depth=2,
+    shots=500,
+    reduction="pca",
+)
+```
+
 ## Implementation Status
 
 | Phase | Story | Status |
@@ -249,8 +278,8 @@ result = clf.evaluate(X_test, y_test)
 | 3. Graphs | 3.1 Graph Builder | ✅ Complete |
 | 4. Classical | 4.1 WL Embeddings | ✅ Complete |
 | 4. Classical | 4.2 SVM Baseline | ✅ Complete |
-| 5. Quantum | 5.1 Quantum Circuit | ⏳ Not Started |
-| 5. Quantum | 5.2 Fidelity Kernel | ⏳ Not Started |
+| 5. Quantum | 5.1 Quantum Circuit | ✅ Complete |
+| 5. Quantum | 5.2 Fidelity Kernel | ✅ Complete |
 | 6. Evaluation | 6.1 Ablations | ⏳ Not Started |
 | 6. Evaluation | 6.2 Figures | ⏳ Not Started |
 | 7. Packaging | 7.1 Caching | ✅ Complete |
@@ -274,6 +303,8 @@ python scripts/validate_story_2_2.py
 python scripts/validate_story_3_1.py
 python scripts/validate_story_4_1.py
 python scripts/validate_story_4_2.py
+python scripts/validate_story_5_1.py
+python scripts/validate_story_5_2.py
 ```
 
 ## Documentation

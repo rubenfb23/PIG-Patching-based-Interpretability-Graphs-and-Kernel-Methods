@@ -4,7 +4,9 @@ This directory contains example scripts and artifacts for the PIG (Patching-base
 
 ## Scripts
 
-- `run_pipeline.py`: An end-to-end example demonstrating the full pipeline from model loading to kernel classification.
+- `run_pipeline.py`: An end-to-end example demonstrating the full pipeline from model loading to kernel classification (classical + quantum). It generates the following visualizations:
+  - `heatmap_*.png`: Average patch effect heatmaps for each slice.
+  - `pca_embeddings.png`: PCA projection of the graph embeddings.
 
 ## Usage
 
