@@ -14,6 +14,7 @@ This script demonstrates:
 
 import logging
 import sys
+from pathlib import Path
 
 # Configure logging
 logging.basicConfig(
@@ -57,6 +58,9 @@ def plot_average_heatmap(effects, filename="heatmap.png"):
 
     logger.info("   Generating heatmaps...")
 
+    output_path = Path(filename)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
     # Aggregate effects by slice
     slice_effects = {}
     for tensor in effects:
@@ -94,7 +98,9 @@ def plot_average_heatmap(effects, filename="heatmap.png"):
 
         # Sanitize filename
         safe_label = label.replace(":", "_").replace(" ", "_").replace("/", "_")
-        out_file = f"{filename.split('.')[0]}_{safe_label}.png"
+        out_file = output_path.with_name(
+            f"{output_path.stem}_{safe_label}{output_path.suffix}"
+        )
 
         plt.savefig(out_file)
         plt.close()
@@ -107,6 +113,9 @@ def plot_pca_embeddings(features, filename="pca.png"):
         return
 
     logger.info("   Generating PCA plot...")
+
+    output_path = Path(filename)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     X = features.to_matrix()
     # Extract labels from slice_labels
@@ -125,13 +134,14 @@ def plot_pca_embeddings(features, filename="pca.png"):
     plt.xlabel(f"PC1 ({pca.explained_variance_ratio_[0]:.2%} var)")
     plt.ylabel(f"PC2 ({pca.explained_variance_ratio_[1]:.2%} var)")
     plt.grid(True, alpha=0.3)
-    plt.savefig(filename)
+    plt.savefig(output_path)
     plt.close()
-    logger.info(f"   Saved PCA plot to {filename}")
+    logger.info(f"   Saved PCA plot to {output_path}")
 
 
 def main():
     logger.info("Starting PIG pipeline example...")
+    output_dir = Path(__file__).parent
 
     # 1. Load a model with activation hooks
     logger.info("1. Loading model (gpt2)...")
@@ -152,7 +162,7 @@ def main():
     logger.info(f"   Computed effects for {len(effects)} slices.")
 
     # Visualization: Heatmaps
-    plot_average_heatmap(effects, filename="examples/heatmap.png")
+    plot_average_heatmap(effects, filename=str(output_dir / "heatmap.png"))
 
     # 4. Build graphs from patch effects
     logger.info("4. Building graphs (per example)...")
@@ -167,7 +177,7 @@ def main():
     logger.info(f"   Feature matrix shape: {features.to_matrix().shape}")
 
     # Visualization: PCA
-    plot_pca_embeddings(features, filename="examples/pca_embeddings.png")
+    plot_pca_embeddings(features, filename=str(output_dir / "pca_embeddings.png"))
 
     # 6. Train a classical kernel baseline
     logger.info("6. Training classical baseline...")
