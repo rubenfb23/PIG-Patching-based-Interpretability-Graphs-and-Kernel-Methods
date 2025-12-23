@@ -1,63 +1,273 @@
 # Patching-based Interpretability Graphs (PIG)
 
-1) generate a large *interventional* dataset via activation patching,
-2) summarize patch effects as a *dataset of sparse graphs* (one graph per “slice” of prompts/corruptions), and
-3) compare slices using *kernel methods* (classical and quantum) to induce a similarity geometry over circuits.
+A Python framework for mechanistic interpretability that:
 
-## What the deck contains
+1. Generates interventional datasets via **activation patching**
+2. Summarizes patch effects as **sparse directed graphs** (one graph per "slice" of prompts/corruptions)
+3. Compares slices using **kernel methods** (classical and quantum) to induce a similarity geometry over circuits
 
-The slides in [docs/patching_graphs_v2.pdf](docs/patching_graphs_v2.pdf) cover:
+## Project Status
 
-- **Problem setting (Mechanistic Interpretability)**: framed as causal structure discovery inside a transformer.
-- **Patching (Interventions → effect maps)**: define clean vs corrupted runs and an effect size per patched node.
-- **Theoretical formulation**: define the node set (by layer/token/component/head), “slices”, and the resulting graph dataset.
-- **Algorithms**:
-  - *Algorithm 1*: compute patch effects and build one sparse weighted directed graph per slice.
-  - *Algorithm 2*: compute classical kernels on graph embeddings (e.g., WL/spectral/graphlets) and run downstream learning.
-  - *Algorithm 3*: “swap” the similarity layer for a quantum fidelity kernel on the same embeddings.
-- **Execution plan**: a task-by-task implementation plan with acceptance tests and minimal code skeletons.
-- **Evaluation checklist**: suggested plots/ablations (noise, sparsity, shots, depth, spectra, clustering viz).
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 1 | Foundation (Model & Prompts) | ✅ Complete |
+| 2 | Patching Engine | ✅ Complete |
+| 3 | Graph Construction | ✅ Complete |
+| 4 | Classical Kernels | ✅ Complete |
+| 5 | Quantum Kernels | 🚧 Planned |
+| 6 | Evaluation & Ablations | 🚧 Planned |
+| 7 | Packaging & Reproducibility | 🟡 Partial |
 
-## Core concepts (as used in the deck)
-
-- **Paired inputs**: for each example $i$, create $(x_i^{\mathrm{cln}}, x_i^{\mathrm{crp}})$ where the corruption breaks the target behavior.
-- **Observable** $O(\cdot)$: a scalar readout such as a target logit $\ell_{y^\star}$ or negative log-prob/loss.
-- **Node** $u$: an internal intervention point indexed by layer, token position, component type (res/att/mlp), and (optionally) head.
-- **Patch effect**: $E_u^{(i)} = O(\tilde f_\theta(x_i^{\mathrm{crp}};u)) - O(f_\theta(x_i^{\mathrm{crp}}))$.
-- **Slice** $s$: a group of examples (task family / corruption type / prompt template family / difficulty bin).
-- **Graph per slice**: $G_s = (\mathcal{V}, \mathcal{E}_s, w_s)$ with a fixed node set $\mathcal{V}$ shared across slices.
-  - Edges use a co-variation rule over patch effects within a slice (e.g., correlation between $\{E_u^{(i)}\}$ and $\{E_v^{(i)}\}$).
-  - Sparsification: keep top-$k$ outgoing edges per node by $|w_s(u\to v)|$.
-
-## Repository layout
-
-- [docs/](docs/)
-  - [docs/patching_graphs_v2.pdf](docs/patching_graphs_v2.pdf): compiled slide deck
-  - [docs/patching_graphs_v2.tex](docs/patching_graphs_v2.tex): LaTeX source
-- [LICENSE](LICENSE)
-
-## Notes on implementation status
-
-This repository currently does not ship a reference Python package or CLI; the code blocks in the deck are templates/skeletons intended to guide an implementation (e.g., with PyTorch + HuggingFace for patching; NumPy for graph building; scikit-learn for SVM/KRR; optional PennyLane for quantum kernel simulation).
-
-If you add an implementation later, a natural next step is to introduce a small `src/` (or `pig/`) package and a minimal “run end-to-end on a toy task” script aligned with the deck’s Task 0–Task 6 acceptance tests.
-
-## (Optional) Rebuilding the PDF
-
-The PDF is already included in [docs/patching_graphs_v2.pdf](docs/patching_graphs_v2.pdf). If you choose to rebuild locally, you’ll need a LaTeX distribution with Beamer/TikZ/algorithm2e.
-
-Example commands:
+## Installation
 
 ```bash
-cd docs
-latexmk -pdf -interaction=nonstopmode patching_graphs_v2.tex
+# Clone the repository
+git clone https://github.com/yourusername/PIG.git
+cd PIG
+
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate
+
+# Install the package
+pip install -e .
+
+# For development
+pip install -e ".[dev]"
 ```
 
-## Citation
+## Quick Start
 
-If you want to reference the current state of the project, cite the repository and/or link the slide deck:
+```python
+from pig.model import HookedModel
+from pig.prompts import create_ioi_dataset
+from pig.patching import compute_patch_effects
+from pig.graph import GraphBuilder
+from pig.embeddings import compute_wl_features
+from pig.kernels import train_classical_baseline
 
-- [docs/patching_graphs_v2.pdf](docs/patching_graphs_v2.pdf)
+# 1. Load a model with activation hooks
+model = HookedModel(model_name="gpt2")
+
+# 2. Generate clean/corrupted prompt pairs
+dataset = create_ioi_dataset(n_examples=50, corruption="name_swap", seed=42)
+
+# 3. Compute patch effects for all (layer, token) positions
+effects = compute_patch_effects(model, dataset)
+
+# 4. Build graphs from patch effects
+builder = GraphBuilder(k=5, enforce_direction=True)
+graphs = builder.build_all(effects)
+
+# 5. Compute WL graph embeddings
+features = compute_wl_features(graphs, depth=3)
+
+# 6. Train a classical kernel baseline
+classifier, results = train_classical_baseline(features, kernel="rbf")
+print(f"Cross-validation accuracy: {results['accuracy_mean']:.2%}")
+```
+
+## Development
+
+### Running Validation Scripts
+
+The project includes validation scripts for each implementation phase:
+
+```bash
+# Phase 1: Model & Prompts
+python scripts/validate_story_1_1.py  # Model setup
+python scripts/validate_story_1_2.py  # Prompt generation
+
+# Phase 2: Patching
+python scripts/validate_story_2_1.py  # Patching hooks
+python scripts/validate_story_2_2.py  # Patch effect tensor
+
+# Phase 3: Graphs
+python scripts/validate_story_3_1.py  # Graph construction
+
+# Phase 4: Classical Kernels
+python scripts/validate_story_4_1.py  # WL embeddings
+python scripts/validate_story_4_2.py  # Classical baseline
+```
+
+### Running Tests
+
+```bash
+pytest tests/
+```
+
+## Architecture
+
+```
+src/pig/
+├── model.py       # HookedModel: activation capture & patching
+├── prompts.py     # Prompt generators (IOI task, corruption strategies)
+├── patching.py    # Patch-effect tensor computation & caching
+├── graph.py       # Graph construction from effects
+├── embeddings.py  # Weisfeiler-Lehman graph embeddings
+└── kernels.py     # Classical SVM classifiers (linear, RBF)
+```
+
+## Core Concepts
+
+### Paired Inputs
+For each example, create `(x_clean, x_corrupt)` where the corruption breaks the target behavior:
+```python
+# Clean: "John gave the book to Mary. Mary gave it back to" → predict "John"
+# Corrupt: "Mary gave the book to Mary. Mary gave it back to" → predict "Mary"
+```
+
+### Patch Effect
+The causal effect of patching node `u = (layer, token)`:
+```
+E_u = O(patched_forward(x_corrupt; u)) - O(forward(x_corrupt))
+```
+where `O` is the observable (target token logit).
+
+### Slices
+Groups of examples by task family, corruption type, or difficulty. Each slice produces one graph.
+
+### Graph Construction
+- **Nodes**: Fixed set of `(layer, token)` positions
+- **Edges**: Correlation of effect profiles within a slice
+- **Direction**: Edges only from earlier to later positions
+- **Sparsity**: Top-k outgoing edges per node
+
+## Modules
+
+### `pig.model` - Model Setup
+```python
+from pig.model import HookedModel
+
+model = HookedModel(model_name="gpt2", device="cuda")
+
+# Cache clean activations
+cache = model.cache_clean("The capital of France is")
+
+# Compute observable
+score = model.score("The capital of France is", "Paris")
+
+# Patch and compute
+patched = model.patched_score(
+    "The capital of Germany is", "Paris", cache, (6, 4)
+)
+```
+
+### `pig.prompts` - Prompt Generation
+```python
+from pig.prompts import IOIGenerator, create_ioi_dataset
+
+# Using the generator directly
+gen = IOIGenerator(seed=42)
+pair = gen.generate()
+print(pair.x_cln)    # Clean prompt
+print(pair.x_crp)    # Corrupted prompt
+print(pair.y_star)   # Target token
+
+# Convenience function
+dataset = create_ioi_dataset(n_examples=100, corruption="name_swap")
+```
+
+### `pig.patching` - Effect Computation
+```python
+from pig.patching import compute_patch_effects, PatchEffectComputer
+
+# With caching
+dataset = compute_patch_effects(
+    model, prompt_pairs,
+    cache_dir=".cache/effects",
+    show_progress=True
+)
+
+# Access effects
+for tensor in dataset:
+    print(tensor.shape)  # (num_layers, num_tokens)
+    hotspots = tensor.get_significant_positions(threshold=0.1)
+```
+
+### `pig.graph` - Graph Construction
+```python
+from pig.graph import GraphBuilder
+
+builder = GraphBuilder(k=5, enforce_direction=True)
+
+# Per-slice graphs (correlation-based)
+graphs = builder.build_all(dataset)
+
+# Per-example graphs (for classification)
+graphs_with_labels = builder.build_per_example(dataset)
+```
+
+### `pig.embeddings` - WL Features
+```python
+from pig.embeddings import compute_wl_features, WLEncoder
+
+# From slice graphs
+features = compute_wl_features(graphs, depth=3)
+X = features.to_matrix()  # Shape: [num_slices, num_features]
+
+# From per-example graphs
+from pig.embeddings import compute_wl_features_from_list
+features = compute_wl_features_from_list(graphs_with_labels, depth=3)
+```
+
+### `pig.kernels` - Classification
+```python
+from pig.kernels import ClassicalKernelClassifier, train_classical_baseline
+
+# Quick training with cross-validation
+clf, cv_results = train_classical_baseline(features, kernel="rbf")
+
+# Manual control
+clf = ClassicalKernelClassifier(kernel="linear", C=1.0)
+clf.fit(X_train, y_train)
+predictions = clf.predict(X_test)
+result = clf.evaluate(X_test, y_test)
+```
+
+## Implementation Status
+
+| Phase | Story | Status |
+|-------|-------|--------|
+| 1. Foundation | 1.1 Model Setup | ✅ Complete |
+| 1. Foundation | 1.2 Prompt Generator | ✅ Complete |
+| 2. Patching | 2.1 Patching Hooks | ✅ Complete |
+| 2. Patching | 2.2 Effect Tensors | ✅ Complete |
+| 3. Graphs | 3.1 Graph Builder | ✅ Complete |
+| 4. Classical | 4.1 WL Embeddings | ✅ Complete |
+| 4. Classical | 4.2 SVM Baseline | ✅ Complete |
+| 5. Quantum | 5.1 Quantum Circuit | ⏳ Not Started |
+| 5. Quantum | 5.2 Fidelity Kernel | ⏳ Not Started |
+| 6. Evaluation | 6.1 Ablations | ⏳ Not Started |
+| 6. Evaluation | 6.2 Figures | ⏳ Not Started |
+| 7. Packaging | 7.1 Caching | ✅ Complete |
+| 7. Packaging | 7.2 CLI | ⏳ Not Started |
+| 7. Packaging | 7.3 Tests | ✅ Complete |
+
+## Running Tests
+
+```bash
+# Run all tests (excluding slow model tests)
+pytest tests/ --ignore=tests/test_model.py
+
+# Run with model tests (requires GPU)
+pytest tests/ -m slow
+
+# Run validation scripts
+python scripts/validate_story_1_1.py
+python scripts/validate_story_1_2.py
+python scripts/validate_story_2_1.py
+python scripts/validate_story_2_2.py
+python scripts/validate_story_3_1.py
+python scripts/validate_story_4_1.py
+python scripts/validate_story_4_2.py
+```
+
+## Documentation
+
+- [docs/patching_graphs_v2.pdf](docs/patching_graphs_v2.pdf) - Original slide deck with theoretical foundations
+- [docs/api.md](docs/api.md) - API reference
+- [PLAN.md](PLAN.md) - Detailed implementation plan with acceptance criteria
 
 ## License
 
