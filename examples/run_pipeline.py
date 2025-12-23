@@ -9,6 +9,7 @@ This script demonstrates:
 4. Building graphs
 5. Computing WL embeddings
 6. Training a classical kernel baseline
+7. Training a quantum kernel baseline
 """
 
 import logging
@@ -29,6 +30,7 @@ try:
     from pig.graph import GraphBuilder
     from pig.embeddings import compute_wl_features, compute_wl_features_from_list
     from pig.kernels import train_classical_baseline
+    from pig.quantum import train_quantum_kernel_baseline
 except ImportError as e:
     logger.error(f"Could not import 'pig': {e}")
     logger.error(
@@ -174,6 +176,19 @@ def main():
 
     logger.info("-" * 40)
     logger.info(f"Cross-validation accuracy: {results['accuracy_mean']:.2%}")
+    logger.info("-" * 40)
+
+    # 7. Train a quantum kernel baseline (lightweight simulator)
+    logger.info("7. Training quantum kernel baseline...")
+    _, q_results, _ = train_quantum_kernel_baseline(
+        features,
+        n_qubits=4,
+        depth=2,
+        shots=500,
+        reduction="pca",
+    )
+
+    logger.info(f"Quantum CV accuracy: {q_results['accuracy_mean']:.2%}")
     logger.info("-" * 40)
     logger.info("Pipeline completed successfully!")
 
