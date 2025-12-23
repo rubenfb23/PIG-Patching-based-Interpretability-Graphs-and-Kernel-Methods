@@ -41,6 +41,7 @@ try:
     import seaborn as sns
     import numpy as np
     from sklearn.decomposition import PCA
+
     VISUALIZATION_AVAILABLE = True
 except ImportError:
     VISUALIZATION_AVAILABLE = False
@@ -53,7 +54,7 @@ def plot_average_heatmap(effects, filename="heatmap.png"):
         return
 
     logger.info("   Generating heatmaps...")
-    
+
     # Aggregate effects by slice
     slice_effects = {}
     for tensor in effects:
@@ -61,36 +62,38 @@ def plot_average_heatmap(effects, filename="heatmap.png"):
         if label not in slice_effects:
             slice_effects[label] = []
         slice_effects[label].append(tensor.effects)
-    
+
     # Plot average heatmap for each slice
     for label, tensors in slice_effects.items():
         # Handle variable shapes by padding to max length
         max_tokens = max(t.shape[1] for t in tensors)
         num_layers = tensors[0].shape[0]
-        
+
         padded_tensors = []
         for t in tensors:
             pad_width = max_tokens - t.shape[1]
             if pad_width > 0:
                 # Pad on the right with NaNs
-                padded = np.pad(t, ((0, 0), (0, pad_width)), mode='constant', constant_values=np.nan)
+                padded = np.pad(
+                    t, ((0, 0), (0, pad_width)), mode="constant", constant_values=np.nan
+                )
                 padded_tensors.append(padded)
             else:
                 padded_tensors.append(t)
-        
+
         # Compute mean ignoring NaNs
         avg_effects = np.nanmean(np.stack(padded_tensors), axis=0)
-        
+
         plt.figure(figsize=(10, 8))
         sns.heatmap(avg_effects, cmap="RdBu_r", center=0)
         plt.title(f"Average Patch Effect: {label}")
         plt.xlabel("Token Position")
         plt.ylabel("Layer")
-        
+
         # Sanitize filename
         safe_label = label.replace(":", "_").replace(" ", "_").replace("/", "_")
         out_file = f"{filename.split('.')[0]}_{safe_label}.png"
-        
+
         plt.savefig(out_file)
         plt.close()
         logger.info(f"   Saved heatmap to {out_file}")
@@ -102,18 +105,18 @@ def plot_pca_embeddings(features, filename="pca.png"):
         return
 
     logger.info("   Generating PCA plot...")
-        
+
     X = features.to_matrix()
     # Extract labels from slice_labels
     labels = [str(l.corruption) for l in features.slice_labels]
-    
+
     if X.shape[0] < 2:
         logger.warning("Not enough samples for PCA.")
         return
 
     pca = PCA(n_components=2)
     X_pca = pca.fit_transform(X)
-    
+
     plt.figure(figsize=(10, 8))
     sns.scatterplot(x=X_pca[:, 0], y=X_pca[:, 1], hue=labels, style=labels, s=100)
     plt.title("PCA of Graph Embeddings (WL Features)")
@@ -123,7 +126,6 @@ def plot_pca_embeddings(features, filename="pca.png"):
     plt.savefig(filename)
     plt.close()
     logger.info(f"   Saved PCA plot to {filename}")
-
 
 
 def main():
@@ -146,7 +148,7 @@ def main():
     logger.info("3. Computing patch effects...")
     effects = compute_patch_effects(model, dataset)
     logger.info(f"   Computed effects for {len(effects)} slices.")
-    
+
     # Visualization: Heatmaps
     plot_average_heatmap(effects, filename="examples/heatmap.png")
 
