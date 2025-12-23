@@ -6,7 +6,7 @@ where edges represent co-influence relationships between patch positions.
 Key features:
 - Fixed node set V across all slices (same patch points)
 - Edge weights from correlation of effect profiles
-- Direction constraint: edges from earlier (ℓ, t) to later
+- Direction constraint: edges from earlier (ℓ, t, component) to later
 - Top-k sparsification per node
 """
 
@@ -18,7 +18,7 @@ from typing import Optional
 import numpy as np
 from numpy.typing import NDArray
 
-from pig.patching import PatchEffectDataset
+from pig.patching import ComponentSpec, PatchEffectDataset
 from pig.prompts import SliceLabel
 
 
@@ -26,29 +26,79 @@ from pig.prompts import SliceLabel
 class Node:
     """A node in the patch-influence graph.
 
-    Represents a (layer, token) position in the residual stream.
+    Represents a (layer, token, component) patch point.
     """
 
     layer: int
     token: int
-    node_type: str = "res"  # "res" for residual stream (MVP)
+    node_type: str = "res"  # "res", "mlp", or "att"
+    head: Optional[int] = None
 
     def __lt__(self, other: "Node") -> bool:
         """Ordering for direction constraint: earlier layers/tokens first."""
         if self.layer != other.layer:
             return self.layer < other.layer
-        return self.token < other.token
+        if self.token != other.token:
+            return self.token < other.token
+        type_order = {"att": 0, "mlp": 1, "res": 2}
+        if self.node_type != other.node_type:
+            return type_order.get(self.node_type, 99) < type_order.get(
+                other.node_type, 99
+            )
+        self_head = -1 if self.head is None else self.head
+        other_head = -1 if other.head is None else other.head
+        return self_head < other_head
 
-    def to_index(self, num_tokens: int) -> int:
+    def to_index(
+        self,
+        num_tokens: int,
+        component_axis: Optional[list[ComponentSpec]] = None,
+    ) -> int:
         """Convert to linear index."""
-        return self.layer * num_tokens + self.token
+        if component_axis is None:
+            if self.node_type != "res" or self.head is not None:
+                raise ValueError(
+                    "component_axis required for non-residual nodes"
+                )
+            return self.layer * num_tokens + self.token
+        component_idx = self._component_index(component_axis)
+        return (
+            (self.layer * num_tokens + self.token) * len(component_axis)
+            + component_idx
+        )
+
+    def _component_index(self, component_axis: list[ComponentSpec]) -> int:
+        for idx, comp in enumerate(component_axis):
+            if comp.node_type == self.node_type and comp.head == self.head:
+                return idx
+        raise ValueError(
+            f"Node not found in component_axis: {self.node_type}, {self.head}"
+        )
 
     @classmethod
-    def from_index(cls, idx: int, num_tokens: int) -> "Node":
+    def from_index(
+        cls,
+        idx: int,
+        num_tokens: int,
+        component_axis: Optional[list[ComponentSpec]] = None,
+    ) -> "Node":
         """Create from linear index."""
-        layer = idx // num_tokens
-        token = idx % num_tokens
-        return cls(layer=layer, token=token)
+        if component_axis is None:
+            layer = idx // num_tokens
+            token = idx % num_tokens
+            return cls(layer=layer, token=token)
+        components = len(component_axis)
+        layer_token = idx // components
+        component_idx = idx % components
+        layer = layer_token // num_tokens
+        token = layer_token % num_tokens
+        comp = component_axis[component_idx]
+        return cls(
+            layer=layer,
+            token=token,
+            node_type=comp.node_type,
+            head=comp.head,
+        )
 
 
 @dataclass
@@ -135,7 +185,12 @@ class PatchInfluenceGraph:
         """Serialize to dictionary matching the schema."""
         return {
             "nodes": [
-                {"layer": n.layer, "token": n.token, "type": n.node_type}
+                {
+                    "layer": n.layer,
+                    "token": n.token,
+                    "type": n.node_type,
+                    **({"head": n.head} if n.head is not None else {}),
+                }
                 for n in self.nodes
             ],
             "edges": [e.to_dict() for e in self.edges],
@@ -151,7 +206,7 @@ class GraphBuilder:
     """Builds patch-influence graphs from effect tensors.
 
     Constructs sparse directed graphs where:
-    - Nodes are (layer, token) positions
+    - Nodes are (layer, token, component) positions
     - Edge weights are correlations of effect profiles
     - Direction constraint ensures information flows forward
     - Top-k sparsification limits graph density
@@ -203,13 +258,27 @@ class GraphBuilder:
         return corr.astype(np.float32)
 
     def _create_nodes(
-        self, num_layers: int, num_tokens: int
+        self,
+        num_layers: int,
+        num_tokens: int,
+        component_axis: Optional[list[ComponentSpec]] = None,
     ) -> list[Node]:
         """Create the fixed node set."""
         nodes = []
         for layer in range(num_layers):
             for token in range(num_tokens):
-                nodes.append(Node(layer=layer, token=token))
+                if component_axis:
+                    for comp in component_axis:
+                        nodes.append(
+                            Node(
+                                layer=layer,
+                                token=token,
+                                node_type=comp.node_type,
+                                head=comp.head,
+                            )
+                        )
+                else:
+                    nodes.append(Node(layer=layer, token=token))
         return nodes
 
     def _apply_direction_constraint(
@@ -268,7 +337,8 @@ class GraphBuilder:
             raise ValueError(f"No tensors found for slice {slice_label}")
 
         # Get common dimensions (uses minimum token count across examples)
-        num_layers, num_tokens = dataset.get_common_dimensions(slice_label)
+        num_layers, num_tokens, _ = dataset.get_common_dimensions(slice_label)
+        component_axis = dataset.get_component_axis()
 
         # Create effect matrix [num_examples, num_nodes]
         # This truncates to num_tokens to ensure consistent dimensions
@@ -278,7 +348,7 @@ class GraphBuilder:
         corr_matrix = self._compute_correlation_matrix(effect_matrix)
 
         # Create nodes
-        nodes = self._create_nodes(num_layers, num_tokens)
+        nodes = self._create_nodes(num_layers, num_tokens, component_axis)
 
         # Apply direction constraint
         if self.enforce_direction:
@@ -345,13 +415,16 @@ class GraphBuilder:
         for tensor in dataset:
             num_layers = tensor.num_layers
             num_tokens = tensor.num_tokens
+            component_axis = tensor.component_axis
 
             # Create nodes
-            nodes = self._create_nodes(num_layers, num_tokens)
+            nodes = self._create_nodes(
+                num_layers, num_tokens, component_axis
+            )
 
             # Build edge weights from effect magnitudes
             # Edges connect positions with similar effect magnitudes
-            effects_flat = tensor.effects.flatten()
+            effects_flat = tensor.effects.reshape(-1)
             n_nodes = len(nodes)
 
             # Compute similarity based on effect values
