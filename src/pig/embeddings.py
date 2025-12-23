@@ -97,7 +97,9 @@ class WLEncoder:
         labels = []
         for node in graph.nodes:
             # Initial label encodes node position
-            label = f"L{node.layer}_T{node.token}"
+            label = f"L{node.layer}_T{node.token}_{node.node_type}"
+            if node.head is not None:
+                label += f"_H{node.head}"
             labels.append(label)
         return labels
 
