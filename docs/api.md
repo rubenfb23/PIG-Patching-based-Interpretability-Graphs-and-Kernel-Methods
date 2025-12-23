@@ -233,9 +233,11 @@ Patch-effect tensor computation and caching.
 ```python
 @dataclass
 class PatchEffectTensor:
-    effects: NDArray[np.float32]  # Shape: [num_layers, num_tokens]
+    effects: NDArray[np.float32]  # Shape: [num_layers, num_tokens, num_components]
+    component_axis: list[ComponentSpec]
     prompt_pair: PromptPair
-    baseline_score: float
+    base_score: float
+    clean_score: float
 ```
 
 Patch effects for a single example.
@@ -243,6 +245,7 @@ Patch effects for a single example.
 **Properties:**
 - `num_layers`: Number of layers
 - `num_tokens`: Number of token positions
+- `num_components`: Number of components per token
 - `slice_label`: The slice label from the prompt pair
 
 **Methods:**
@@ -253,12 +256,12 @@ Patch effects for a single example.
 def get_significant_positions(
     self,
     threshold: float = 0.1
-) -> list[tuple[int, int, float]]
+) -> list[tuple[int, int, int, float]]
 ```
 
 Get positions with effects above threshold.
 
-**Returns:** List of `(layer, token, effect)` tuples
+**Returns:** List of `(layer, token, component_idx, effect)` tuples
 
 ### PatchEffectDataset
 
@@ -365,7 +368,8 @@ def compute_patch_effects(
     model: HookedModel,
     prompt_pairs: list[PromptPair],
     cache_dir: str | None = None,
-    show_progress: bool = False
+    show_progress: bool = False,
+    node_types: Sequence[str] | None = None
 ) -> PatchEffectDataset
 ```
 
@@ -384,10 +388,11 @@ Graph construction from patch effects.
 class Node:
     layer: int
     token: int
-    index: int  # Unique index in graph
+    node_type: str
+    head: int | None = None
 ```
 
-A node representing a `(layer, token)` position.
+A node representing a `(layer, token, component)` patch point.
 
 ### Edge
 

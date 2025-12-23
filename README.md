@@ -52,7 +52,8 @@ model = HookedModel(model_name="gpt2")
 # 2. Generate clean/corrupted prompt pairs
 dataset = create_ioi_dataset(n_examples=50, corruption="name_swap", seed=42)
 
-# 3. Compute patch effects for all (layer, token) positions
+# 3. Compute patch effects for all (layer, token[, component]) positions
+# Use node_types=("res", "mlp", "att") for fine-grained components.
 effects = compute_patch_effects(model, dataset)
 
 # 4. Build graphs from patch effects
