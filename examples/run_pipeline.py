@@ -67,7 +67,14 @@ def plot_average_heatmap(effects, filename="heatmap.png"):
         label = str(tensor.prompt_pair.slice_label)
         if label not in slice_effects:
             slice_effects[label] = []
-        slice_effects[label].append(tensor.effects)
+        if tensor.effects.ndim == 3:
+            try:
+                res_idx = tensor.component_index("res")
+                slice_effects[label].append(tensor.effects[:, :, res_idx])
+            except ValueError:
+                slice_effects[label].append(tensor.effects.mean(axis=2))
+        else:
+            slice_effects[label].append(tensor.effects)
 
     # Plot average heatmap for each slice
     for label, tensors in slice_effects.items():
@@ -156,9 +163,10 @@ def main():
     dataset = dataset_swap + dataset_abba
     logger.info(f"   Generated {len(dataset)} examples (10 name_swap, 10 abba).")
 
-    # 3. Compute patch effects for all (layer, token) positions
+    # 3. Compute patch effects for all (layer, token[, component]) positions
     logger.info("3. Computing patch effects...")
-    effects = compute_patch_effects(model, dataset)
+    node_types = ("res",)  # Use ("res", "mlp", "att") for fine-grained nodes
+    effects = compute_patch_effects(model, dataset, node_types=node_types)
     logger.info(f"   Computed effects for {len(effects)} slices.")
 
     # Visualization: Heatmaps
