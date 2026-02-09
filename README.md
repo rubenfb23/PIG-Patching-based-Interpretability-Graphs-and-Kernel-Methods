@@ -106,6 +106,7 @@ pytest tests/
 ```
 src/pig/
 ├── model.py       # HookedModel: activation capture & patching
+├── toy_model.py   # ToyHookedModel: tiny local transformer for fast tests
 ├── prompts.py     # Prompt generators (IOI task, corruption strategies)
 ├── patching.py    # Patch-effect tensor computation & caching
 ├── graph.py       # Graph construction from effects
@@ -164,6 +165,19 @@ score = model.score("The capital of France is", "Paris")
 # Patch and compute
 patched = model.patched_score(
     "The capital of Germany is", "Paris", cache, (6, 4)
+)
+```
+
+### `pig.toy_model` - Ultra-Simple Local Transformer (for tests)
+
+```python
+from pig.toy_model import ToyHookedModel, TinyTransformerConfig
+
+toy = ToyHookedModel(
+    config=TinyTransformerConfig(
+        d_model=32, n_layers=2, n_heads=4, mlp_dim=64, max_seq_len=96
+    ),
+    device="cpu",
 )
 ```
 

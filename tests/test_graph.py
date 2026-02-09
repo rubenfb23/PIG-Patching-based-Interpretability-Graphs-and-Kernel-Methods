@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from pig.graph import Edge, GraphBuilder, Node, PatchInfluenceGraph
-from pig.patching import PatchEffectDataset, PatchEffectTensor
+from pig.patching import ComponentSpec, PatchEffectDataset, PatchEffectTensor
 from pig.prompts import PromptPair, SliceLabel
 
 
@@ -33,8 +33,9 @@ class TestNode:
         node = Node(layer=3, token=5)
         num_tokens = 10
 
-        idx = node.to_index(num_tokens)
-        restored = Node.from_index(idx, num_tokens)
+        component_axis = [ComponentSpec(node_type="res")]
+        idx = node.to_index(num_tokens, component_axis)
+        restored = Node.from_index(idx, num_tokens, component_axis)
 
         assert restored.layer == node.layer
         assert restored.token == node.token
@@ -139,15 +140,16 @@ class TestGraphBuilder:
         """Create a sample dataset for graph building."""
         dataset = PatchEffectDataset()
         slice_label = SliceLabel(task="ioi", corruption="name_swap")
+        component_axis = [ComponentSpec(node_type="res")]
 
         # Create 10 examples with correlated effects
         np.random.seed(42)
         for i in range(10):
             # Create effects with some structure
-            effects = np.random.randn(4, 5).astype(np.float32)
+            effects = np.random.randn(4, 5, 1).astype(np.float32)
             # Add correlation between certain positions
-            effects[0, :] += 0.5 * effects[1, :]
-            effects[2, :] += 0.5 * effects[3, :]
+            effects[0, :, 0] += 0.5 * effects[1, :, 0]
+            effects[2, :, 0] += 0.5 * effects[3, :, 0]
 
             pair = PromptPair(
                 x_cln=f"Clean {i}",
@@ -158,6 +160,7 @@ class TestGraphBuilder:
             )
             tensor = PatchEffectTensor(
                 effects=effects,
+                component_axis=component_axis,
                 prompt_pair=pair,
                 base_score=-80.0,
                 clean_score=-70.0,

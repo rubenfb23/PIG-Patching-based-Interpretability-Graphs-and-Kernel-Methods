@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from pig.patching import (
+    ComponentSpec,
     PatchEffectCache,
     PatchEffectDataset,
     PatchEffectTensor,
@@ -20,9 +21,9 @@ class TestPatchEffectTensor:
     @pytest.fixture
     def sample_tensor(self):
         """Create a sample tensor for testing."""
-        effects = np.random.randn(12, 8).astype(np.float32)
-        effects[5, 3] = 5.0  # Significant positive
-        effects[7, 2] = -3.0  # Significant negative
+        effects = np.random.randn(12, 8, 1).astype(np.float32)
+        effects[5, 3, 0] = 5.0  # Significant positive
+        effects[7, 2, 0] = -3.0  # Significant negative
 
         pair = PromptPair(
             x_cln="John gave to Mary",
@@ -34,6 +35,7 @@ class TestPatchEffectTensor:
 
         return PatchEffectTensor(
             effects=effects,
+            component_axis=[ComponentSpec(node_type="res")],
             prompt_pair=pair,
             base_score=-80.0,
             clean_score=-70.0,
@@ -43,7 +45,7 @@ class TestPatchEffectTensor:
         """Test tensor properties."""
         assert sample_tensor.num_layers == 12
         assert sample_tensor.num_tokens == 8
-        assert sample_tensor.shape == (12, 8)
+        assert sample_tensor.shape == (12, 8, 1)
 
     def test_get_effect(self, sample_tensor):
         """Test getting effect at specific position."""
@@ -59,7 +61,7 @@ class TestPatchEffectTensor:
 
         # Check sorting by |effect|
         for i in range(len(positions) - 1):
-            assert abs(positions[i][2]) >= abs(positions[i + 1][2])
+            assert abs(positions[i][3]) >= abs(positions[i + 1][3])
 
     def test_to_dict_from_dict(self, sample_tensor):
         """Test serialization roundtrip."""
@@ -103,7 +105,8 @@ class TestPatchEffectDataset:
                 meta={},
             )
             tensor = PatchEffectTensor(
-                effects=np.random.randn(12, 8).astype(np.float32),
+                effects=np.random.randn(12, 8, 1).astype(np.float32),
+                component_axis=[ComponentSpec(node_type="res")],
                 prompt_pair=pair,
                 base_score=-80.0,
                 clean_score=-70.0,
@@ -177,7 +180,8 @@ class TestPatchEffectCache:
             meta={"name_s": "John", "name_io": "Mary"},
         )
         return PatchEffectTensor(
-            effects=np.random.randn(12, 8).astype(np.float32),
+            effects=np.random.randn(12, 8, 1).astype(np.float32),
+            component_axis=[ComponentSpec(node_type="res")],
             prompt_pair=pair,
             base_score=-80.0,
             clean_score=-70.0,
@@ -188,14 +192,22 @@ class TestPatchEffectCache:
         model_name = "gpt2"
 
         # Initially not in cache
-        result = temp_cache.get(sample_tensor.prompt_pair, model_name)
+        result = temp_cache.get(
+            sample_tensor.prompt_pair,
+            model_name,
+            sample_tensor.component_axis,
+        )
         assert result is None
 
         # Store
         temp_cache.put(sample_tensor, model_name)
 
         # Now should be retrievable
-        result = temp_cache.get(sample_tensor.prompt_pair, model_name)
+        result = temp_cache.get(
+            sample_tensor.prompt_pair,
+            model_name,
+            sample_tensor.component_axis,
+        )
         assert result is not None
         np.testing.assert_array_almost_equal(
             result.effects, sample_tensor.effects
@@ -206,9 +218,23 @@ class TestPatchEffectCache:
         model_name = "gpt2"
 
         temp_cache.put(sample_tensor, model_name)
-        assert temp_cache.get(sample_tensor.prompt_pair, model_name) is not None
+        assert (
+            temp_cache.get(
+                sample_tensor.prompt_pair,
+                model_name,
+                sample_tensor.component_axis,
+            )
+            is not None
+        )
 
         count = temp_cache.clear()
         assert count == 1
 
-        assert temp_cache.get(sample_tensor.prompt_pair, model_name) is None
+        assert (
+            temp_cache.get(
+                sample_tensor.prompt_pair,
+                model_name,
+                sample_tensor.component_axis,
+            )
+            is None
+        )
