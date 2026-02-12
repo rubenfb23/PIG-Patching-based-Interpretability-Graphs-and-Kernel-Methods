@@ -45,9 +45,7 @@ class ActivationCache:
         head: Optional[int] = None,
     ) -> None:
         """Store activation for a given (layer, token, node_type, head)."""
-        self.activations[(layer, token, node_type, head)] = (
-            activation.detach().clone()
-        )
+        self.activations[(layer, token, node_type, head)] = activation.detach().clone()
 
     def get(
         self,
@@ -164,6 +162,7 @@ class HookedModel:
         self, layer: int, node_type: str
     ) -> Callable[[torch.nn.Module, tuple, tuple], None]:
         """Create a hook that captures activations."""
+
         def hook(module: torch.nn.Module, inputs: tuple, output: tuple) -> None:
             if self._capture_cache is None:
                 return
@@ -181,12 +180,14 @@ class HookedModel:
                     hidden_states[0, token, :],
                     node_type=node_type,
                 )
+
         return hook
 
     def _make_patch_hook(
         self, layer: int, node_type: str
     ) -> Callable[[torch.nn.Module, tuple, tuple], tuple | Tensor]:
         """Create a hook that patches (replaces) activations."""
+
         def hook(
             module: torch.nn.Module, inputs: tuple, output: tuple
         ) -> tuple | Tensor:
@@ -200,16 +201,13 @@ class HookedModel:
                 tail = None
             for token in range(hidden_states.shape[1]):
                 if (layer, token, node_type, None) in self._patch_positions:
-                    patch_act = self._patch_cache.get(
-                        layer, token, node_type=node_type
-                    )
+                    patch_act = self._patch_cache.get(layer, token, node_type=node_type)
                     if patch_act is not None:
-                        hidden_states[0, token, :] = patch_act.to(
-                            hidden_states.device
-                        )
+                        hidden_states[0, token, :] = patch_act.to(hidden_states.device)
             if tail is None:
                 return hidden_states
             return (hidden_states,) + tail
+
         return hook
 
     def _make_attn_pre_hook(
@@ -219,6 +217,7 @@ class HookedModel:
         patch: bool,
     ) -> Callable[[torch.nn.Module, tuple], Optional[tuple]]:
         """Create a pre-hook for attention head inputs to c_proj."""
+
         def hook(module: torch.nn.Module, inputs: tuple) -> Optional[tuple]:
             if not inputs:
                 return None
@@ -241,9 +240,7 @@ class HookedModel:
 
             if patch and self._patch_cache is not None and self._patch_positions:
                 updated = hidden_states.clone()
-                heads = updated.view(
-                    batch, seq_len, self.n_heads, self.head_dim
-                )
+                heads = updated.view(batch, seq_len, self.n_heads, self.head_dim)
                 for token in range(seq_len):
                     for head in range(self.n_heads):
                         if (layer, token, NODE_TYPE_ATT, head) in self._patch_positions:
@@ -254,12 +251,11 @@ class HookedModel:
                                 head=head,
                             )
                             if patch_act is not None:
-                                heads[0, token, head, :] = patch_act.to(
-                                    updated.device
-                                )
+                                heads[0, token, head, :] = patch_act.to(updated.device)
                 return (updated,) + inputs[1:]
 
             return None
+
         return hook
 
     def _normalize_patch_node(
@@ -331,17 +327,13 @@ class HookedModel:
 
             if capture and NODE_TYPE_ATT in self._capture_components:
                 hook = block.attn.c_proj.register_forward_pre_hook(
-                    self._make_attn_pre_hook(
-                        layer, capture=True, patch=False
-                    )
+                    self._make_attn_pre_hook(layer, capture=True, patch=False)
                 )
                 self._hooks.append(hook)
 
             if patch and NODE_TYPE_ATT in self._patch_components:
                 hook = block.attn.c_proj.register_forward_pre_hook(
-                    self._make_attn_pre_hook(
-                        layer, capture=False, patch=True
-                    )
+                    self._make_attn_pre_hook(layer, capture=False, patch=True)
                 )
                 self._hooks.append(hook)
 
