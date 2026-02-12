@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
 from pathlib import Path
-
 
 VALIDATION_SEQUENCE = [
     "validate_story_1_1.py",
@@ -19,7 +19,10 @@ VALIDATION_SEQUENCE = [
     "validate_story_4_2.py",
     "validate_story_5_1.py",
     "validate_story_5_2.py",
+    "generate_pipeline_artifacts.py",
 ]
+
+MODEL_OUTPUT_SUFFIXES = ("_gpt2", "_toy")
 
 
 def _repo_root() -> Path:
@@ -30,7 +33,78 @@ def _scripts_dir() -> Path:
     return _repo_root() / "scripts"
 
 
-def _run_script(script_name: str) -> int:
+def _model_output_suffix(model_name: str) -> str:
+    normalized = model_name.strip().lower()
+    if normalized in {"toy", "toy_model", "toy_transformer"}:
+        return "_toy"
+    return "_gpt2"
+
+
+def _snapshot_suffixed_outputs() -> dict[str, bytes]:
+    outputs_dir = _repo_root() / "outputs"
+    if not outputs_dir.exists():
+        return {}
+
+    snapshot: dict[str, bytes] = {}
+    for path in outputs_dir.iterdir():
+        if not path.is_file():
+            continue
+        if not path.stem.endswith(MODEL_OUTPUT_SUFFIXES):
+            continue
+        snapshot[path.name] = path.read_bytes()
+    return snapshot
+
+
+def _restore_suffixed_outputs(snapshot: dict[str, bytes]) -> int:
+    if not snapshot:
+        return 0
+
+    outputs_dir = _repo_root() / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+
+    restored_count = 0
+    for file_name, content in snapshot.items():
+        path = outputs_dir / file_name
+        if path.exists():
+            continue
+        path.write_bytes(content)
+        restored_count += 1
+
+    return restored_count
+
+
+def _suffix_output_files(model_name: str) -> int:
+    outputs_dir = _repo_root() / "outputs"
+    if not outputs_dir.exists():
+        return 0
+
+    suffix = _model_output_suffix(model_name)
+    renamed_count = 0
+
+    for path in outputs_dir.iterdir():
+        if not path.is_file():
+            continue
+        if path.stem.endswith(MODEL_OUTPUT_SUFFIXES):
+            continue
+
+        candidate = path.with_name(f"{path.stem}{suffix}{path.suffix}")
+        if candidate.exists():
+            duplicate_index = 2
+            while True:
+                candidate = path.with_name(
+                    f"{path.stem}{suffix}_{duplicate_index}{path.suffix}"
+                )
+                if not candidate.exists():
+                    break
+                duplicate_index += 1
+
+        path.rename(candidate)
+        renamed_count += 1
+
+    return renamed_count
+
+
+def _run_script(script_name: str, model_name: str) -> int:
     script_path = _scripts_dir() / script_name
     if not script_path.exists():
         print(f"[FAIL] Missing script: {script_path}")
@@ -43,21 +117,24 @@ def _run_script(script_name: str) -> int:
     result = subprocess.run(
         [sys.executable, str(script_path)],
         cwd=str(_repo_root()),
+        env={**os.environ, "PIG_MODEL_NAME": model_name},
         check=False,
     )
     return result.returncode
 
 
-def run_pipeline(stop_on_failure: bool = True) -> int:
+def run_pipeline(model_name: str, stop_on_failure: bool = True) -> int:
     start_time = time.time()
     failures: list[tuple[str, int]] = []
+    output_snapshot = _snapshot_suffixed_outputs()
 
     print("PIG pipeline runner")
     print(f"Python: {sys.executable}")
     print(f"Repo: {_repo_root()}")
+    print(f"Model: {model_name}")
 
     for script_name in VALIDATION_SEQUENCE:
-        exit_code = _run_script(script_name)
+        exit_code = _run_script(script_name, model_name)
         if exit_code != 0:
             failures.append((script_name, exit_code))
             print(f"[FAIL] {script_name} exited with code {exit_code}")
@@ -69,11 +146,19 @@ def run_pipeline(stop_on_failure: bool = True) -> int:
     elapsed = time.time() - start_time
     print(f"\nElapsed: {elapsed:.1f}s")
 
+    restored_count = _restore_suffixed_outputs(output_snapshot)
+    if restored_count > 0:
+        print(f"Previously suffixed outputs restored: {restored_count}")
+
     if failures:
         print("Failures:")
         for script_name, code in failures:
             print(f"- {script_name}: {code}")
         return 1
+
+    renamed_count = _suffix_output_files(model_name)
+    if renamed_count > 0:
+        print("Output files renamed with model suffix: " f"{renamed_count}")
 
     print("All validation stories completed successfully.")
     return 0
@@ -92,6 +177,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Continue executing remaining scripts even if one fails",
     )
+    pipeline_parser.add_argument(
+        "--model-name",
+        default="gpt2",
+        help="Model identifier to use (e.g. gpt2, toy_transformer)",
+    )
 
     return parser
 
@@ -101,7 +191,10 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command in (None, "pipeline"):
-        code = run_pipeline(stop_on_failure=not args.continue_on_error)
+        code = run_pipeline(
+            model_name=args.model_name,
+            stop_on_failure=not args.continue_on_error,
+        )
         raise SystemExit(code)
 
     parser.print_help()
