@@ -64,6 +64,12 @@ Recommended invocation (no manual venv activation):
 uv run pig pipeline
 ```
 
+Run with the ultralight in-repo toy model:
+
+```bash
+uv run pig pipeline --model-name toy_transformer
+```
+
 Direct invocation also works if your environment exposes `pig` in `PATH`:
 
 ```bash
@@ -91,6 +97,8 @@ uv sync --dev
 uv run pig --help
 uv run pig pipeline
 uv run pig pipeline --continue-on-error
+uv run pig pipeline --model-name toy_transformer
+uv run python scripts/compare_model_memory.py --model-a gpt2 --model-b toy_transformer --device cpu
 
 # pdm
 pdm install -G dev
@@ -102,7 +110,7 @@ pdm run pipeline
 ## Quick Start
 
 ```python
-from pig.model import HookedModel
+from pig.model import create_model
 from pig.prompts import create_ioi_dataset
 from pig.patching import compute_patch_effects
 from pig.graph import GraphBuilder
@@ -110,7 +118,8 @@ from pig.embeddings import compute_wl_features
 from pig.kernels import train_classical_baseline
 
 # 1. Load a model with activation hooks
-model = HookedModel(model_name="gpt2")
+model = create_model(model_name="gpt2")
+# model = create_model(model_name="toy_transformer")
 
 # 2. Generate clean/corrupted prompt pairs
 dataset = create_ioi_dataset(n_examples=50, corruption="name_swap", seed=42)
