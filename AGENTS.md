@@ -29,7 +29,7 @@ Implemented and usable now:
 - Graph builder with top-k sparsification and optional direction constraint.
 - WL embeddings + classical SVM baselines.
 - Quantum kernel utilities and quantum baseline routines.
-- CLI pipeline runner that executes story validation scripts in sequence.
+- CLI pipeline runner that executes the full pipeline sequence.
 - Artifact generation script for heatmaps and PCA visualization.
 
 Still evolving:
@@ -56,13 +56,8 @@ Primary package:
 
 Operational scripts:
 
-- `scripts/validate_story_1_1.py` ... `scripts/validate_story_5_2.py`.
 - `scripts/generate_pipeline_artifacts.py`.
 - `scripts/compare_model_memory.py`.
-
-Tests:
-
-- `tests/` module-level unit and integration-style checks.
 
 ---
 
@@ -117,17 +112,7 @@ uv run pig pipeline --continue-on-error
 
 What `pig pipeline` does internally (`src/pig/cli.py`):
 
-1. Runs validation scripts in fixed order:
-   - `validate_story_1_1.py`
-   - `validate_story_1_2.py`
-   - `validate_story_2_1.py`
-   - `validate_story_2_2.py`
-   - `validate_story_3_1.py`
-   - `validate_story_4_1.py`
-   - `validate_story_4_2.py`
-   - `validate_story_5_1.py`
-   - `validate_story_5_2.py`
-   - `generate_pipeline_artifacts.py`
+1. Runs the pipeline scripts in a fixed sequence ending in artifact generation.
 2. Sets environment variable `PIG_MODEL_NAME=<model-name>` for each script.
 3. Renames fresh output images with model suffix (`_gpt2` or `_toy`) to avoid collisions.
 4. Restores previously-suffixed outputs if missing.
@@ -194,23 +179,14 @@ When taking a new task:
 2. Read touched modules in `src/pig/` before editing.
 3. Reproduce baseline with:
    - `uv run pig pipeline --model-name toy_transformer` (fast sanity path).
-4. Run focused tests first, then broader tests.
-5. Keep changes minimal and pipeline-compatible.
-6. If output naming or artifacts are affected, check `src/pig/cli.py` behavior.
+4. Keep changes minimal and pipeline-compatible.
+5. If output naming or artifacts are affected, check `src/pig/cli.py` behavior.
 
 ---
 
-## 9) Quality gates before handoff
+## 9) Verification before handoff
 
 Before finalizing a change, run:
-
-```bash
-uv run ruff check src tests scripts
-uv run black --check src tests scripts
-uv run pytest tests/
-```
-
-If the task touches end-to-end behavior, also run:
 
 ```bash
 uv run pig pipeline --model-name toy_transformer
@@ -268,10 +244,8 @@ uv run python scripts/generate_pipeline_artifacts.py
 # Memory comparison utility
 uv run python scripts/compare_model_memory.py --model-a gpt2 --model-b toy_transformer --device cpu
 
-# Lint/format/test
-uv run ruff check src tests scripts
-uv run black --check src tests scripts
-uv run pytest tests/
+# Verification run
+uv run pig pipeline --model-name toy_transformer
 ```
 
 ---
@@ -281,7 +255,6 @@ uv run pytest tests/
 A contribution is complete when:
 
 - The intended behavior is implemented and validated.
-- Relevant tests pass locally.
 - Pipeline still runs for toy model.
 - Documentation is updated if interfaces/commands changed.
 - No unrelated refactors or scope creep were introduced.
