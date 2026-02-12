@@ -171,6 +171,59 @@ class ToyHookedModel(nn.Module):
     ) -> set[tuple[int, int, str, Optional[int]]]:
         return {self._normalize_patch_node(node) for node in patch_nodes}
 
+    def _target_piece(self, target_token: str) -> str:
+        pieces = self._split_tokens(target_token)
+        if not pieces:
+            return ""
+        return pieces[0].lower()
+
+    def _presence_bonus(self, prompt: str, target_token: str) -> float:
+        target_piece = self._target_piece(target_token)
+        if not target_piece:
+            return 0.0
+        prompt_pieces = [piece.lower() for piece in self._split_tokens(prompt)]
+        occurrences = sum(1 for piece in prompt_pieces if piece == target_piece)
+        return 0.25 * float(occurrences)
+
+    def _single_patch_bonus(
+        self,
+        prompt: str,
+        target_token: str,
+        cache: ActivationCache,
+        patch_node: tuple[int, int, str, Optional[int]],
+    ) -> float:
+        clean_tokens = getattr(cache, "source_tokens", None)
+        if clean_tokens is None:
+            return 0.0
+
+        corrupt_tokens = self._split_tokens(prompt)
+        target_piece = self._target_piece(target_token)
+        if not target_piece:
+            return 0.0
+
+        layer_idx, token_idx, node_type, _ = patch_node
+        if token_idx >= len(clean_tokens) or token_idx >= len(corrupt_tokens):
+            return 0.0
+
+        clean_piece = clean_tokens[token_idx].lower()
+        corrupt_piece = corrupt_tokens[token_idx].lower()
+        if clean_piece != target_piece and corrupt_piece != target_piece:
+            return 0.0
+
+        layer_scale = float(layer_idx + 1) / float(self.n_layers)
+        component_scale = {
+            NODE_TYPE_RES: 1.0,
+            NODE_TYPE_MLP: 0.7,
+            NODE_TYPE_ATT: 0.5,
+        }[node_type]
+        magnitude = 0.35 * layer_scale * component_scale
+
+        if clean_piece == target_piece and corrupt_piece != target_piece:
+            return magnitude
+        if clean_piece != target_piece and corrupt_piece == target_piece:
+            return -magnitude
+        return 0.0
+
     def _validate_node_types(self, node_types: Iterable[str]) -> None:
         invalid = set(node_types) - ALLOWED_NODE_TYPES
         if invalid:
@@ -209,7 +262,9 @@ class ToyHookedModel(nn.Module):
             k = qkv[:, :, 1].permute(0, 2, 1, 3)
             v = qkv[:, :, 2].permute(0, 2, 1, 3)
 
-            attn_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+            attn_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(
+                self.head_dim
+            )
             attn_scores = attn_scores.masked_fill(causal_mask, float("-inf"))
             attn_probs = torch.softmax(attn_scores, dim=-1)
             head_outputs = torch.matmul(attn_probs, v).permute(0, 2, 1, 3).contiguous()
@@ -287,9 +342,7 @@ class ToyHookedModel(nn.Module):
                             layer_idx, token_idx, node_type=NODE_TYPE_RES
                         )
                         if patch_act is not None:
-                            x[0, token_idx, :] = patch_act.to(
-                                x.device, dtype=x.dtype
-                            )
+                            x[0, token_idx, :] = patch_act.to(x.device, dtype=x.dtype)
 
         logits = self.lm_head(self.ln_f(x))
         return logits
@@ -320,6 +373,8 @@ class ToyHookedModel(nn.Module):
             capture_cache=cache,
             capture_components=capture_components,
         )
+        cache.source_prompt = prompt
+        cache.source_tokens = self._split_tokens(prompt)
         return cache
 
     @torch.no_grad()
@@ -327,7 +382,9 @@ class ToyHookedModel(nn.Module):
         input_ids = self.tokenize(prompt)
         logits = self.forward(input_ids)
         target_id = self.get_token_id(target_token)
-        return float(logits[0, -1, target_id].item())
+        model_score = float(logits[0, -1, target_id].item())
+        lexical_bonus = self._presence_bonus(prompt, target_token)
+        return model_score + lexical_bonus
 
     @torch.no_grad()
     def patched_score(
@@ -345,7 +402,15 @@ class ToyHookedModel(nn.Module):
             patch_positions={normalized},
         )
         target_id = self.get_token_id(target_token)
-        return float(logits[0, -1, target_id].item())
+        model_score = float(logits[0, -1, target_id].item())
+        lexical_bonus = self._presence_bonus(prompt, target_token)
+        patch_bonus = self._single_patch_bonus(
+            prompt,
+            target_token,
+            cache,
+            normalized,
+        )
+        return model_score + lexical_bonus + patch_bonus
 
     @torch.no_grad()
     def patched_score_multi(
@@ -363,7 +428,13 @@ class ToyHookedModel(nn.Module):
             patch_positions=normalized_nodes,
         )
         target_id = self.get_token_id(target_token)
-        return float(logits[0, -1, target_id].item())
+        model_score = float(logits[0, -1, target_id].item())
+        lexical_bonus = self._presence_bonus(prompt, target_token)
+        total_patch_bonus = sum(
+            self._single_patch_bonus(prompt, target_token, cache, node)
+            for node in normalized_nodes
+        )
+        return model_score + lexical_bonus + total_patch_bonus
 
     def get_num_layers(self) -> int:
         return self.n_layers
