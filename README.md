@@ -6,18 +6,6 @@ A Python framework for mechanistic interpretability that:
 2. Summarizes patch effects as **sparse directed graphs** (one graph per "slice" of prompts/corruptions)
 3. Compares slices using **kernel methods** (classical and quantum) to induce a similarity geometry over circuits
 
-## Project Status
-
-| Phase | Description | Status |
-|-------|-------------|--------|
-| 1 | Foundation (Model & Prompts) | ✅ Complete |
-| 2 | Patching Engine | ✅ Complete |
-| 3 | Graph Construction | ✅ Complete |
-| 4 | Classical Kernels | ✅ Complete |
-| 5 | Quantum Kernels | ✅ Complete |
-| 6 | Evaluation & Ablations | 🚧 Planned |
-| 7 | Packaging & Reproducibility | 🟡 Partial |
-
 ## Installation
 
 ```bash
@@ -138,42 +126,6 @@ features = compute_wl_features(graphs, depth=3)
 # 6. Train a classical kernel baseline
 classifier, results = train_classical_baseline(features, kernel="rbf")
 print(f"Cross-validation accuracy: {results['accuracy_mean']:.2%}")
-```
-
-## Development
-
-### Running Validation Scripts
-
-The project includes validation scripts for each implementation phase:
-
-```bash
-# Single entry point (recommended)
-pig pipeline
-
-# Phase 1: Model & Prompts
-python scripts/validate_story_1_1.py  # Model setup
-python scripts/validate_story_1_2.py  # Prompt generation
-
-# Phase 2: Patching
-python scripts/validate_story_2_1.py  # Patching hooks
-python scripts/validate_story_2_2.py  # Patch effect tensor
-
-# Phase 3: Graphs
-python scripts/validate_story_3_1.py  # Graph construction
-
-# Phase 4: Classical Kernels
-python scripts/validate_story_4_1.py  # WL embeddings
-python scripts/validate_story_4_2.py  # Classical baseline
-
-# Phase 5: Quantum Kernels
-python scripts/validate_story_5_1.py  # Quantum feature map
-python scripts/validate_story_5_2.py  # Quantum fidelity kernel
-```
-
-### Running Tests
-
-```bash
-pytest tests/
 ```
 
 ## Architecture
@@ -375,27 +327,6 @@ clf, cv_results, _ = train_quantum_kernel_baseline(
 | 7. Packaging | 7.1 Caching | ✅ Complete |
 | 7. Packaging | 7.2 CLI | ⏳ Not Started |
 | 7. Packaging | 7.3 Tests | ✅ Complete |
-
-## Running Tests
-
-```bash
-# Run all tests (excluding slow model tests)
-pytest tests/ --ignore=tests/test_model.py
-
-# Run with model tests (requires GPU)
-pytest tests/ -m slow
-
-# Run validation scripts
-python scripts/validate_story_1_1.py
-python scripts/validate_story_1_2.py
-python scripts/validate_story_2_1.py
-python scripts/validate_story_2_2.py
-python scripts/validate_story_3_1.py
-python scripts/validate_story_4_1.py
-python scripts/validate_story_4_2.py
-python scripts/validate_story_5_1.py
-python scripts/validate_story_5_2.py
-```
 
 ## Documentation
 
