@@ -9,6 +9,7 @@ This module provides utilities for:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 
@@ -20,6 +21,8 @@ NODE_TYPE_RES = "res"
 NODE_TYPE_MLP = "mlp"
 NODE_TYPE_ATT = "att"
 ALLOWED_NODE_TYPES = {NODE_TYPE_RES, NODE_TYPE_MLP, NODE_TYPE_ATT}
+
+TOY_MODEL_ALIASES = {"toy", "toy_model", "toy_transformer"}
 
 
 @dataclass
@@ -522,3 +525,43 @@ class HookedModel:
     def get_num_tokens(self, prompt: str) -> int:
         """Return the number of tokens in a prompt."""
         return len(self.tokenize(prompt)[0])
+
+
+def create_model(
+    model_name: str = "gpt2",
+    device: Optional[str] = None,
+    dtype: torch.dtype = torch.float32,
+):
+    """Create a model instance compatible with the patching pipeline.
+
+    Supports HuggingFace causal LMs via HookedModel and the in-repo
+    `ToyHookedModel` for ultrafast tests.
+    """
+    normalized = model_name.strip().lower()
+    if normalized in TOY_MODEL_ALIASES:
+        from pig.toy_model import TinyTransformerConfig, ToyHookedModel
+
+        resolved_device = device
+        if resolved_device is None:
+            resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        return ToyHookedModel(
+            config=TinyTransformerConfig(),
+            device=resolved_device,
+            dtype=dtype,
+        )
+
+    return HookedModel(model_name=model_name, device=device, dtype=dtype)
+
+
+def create_model_from_env(
+    default_model_name: str = "gpt2",
+    device: Optional[str] = None,
+    dtype: torch.dtype = torch.float32,
+):
+    """Create model from env variable `PIG_MODEL_NAME`.
+
+    If the env var is not set, uses `default_model_name`.
+    """
+    model_name = os.getenv("PIG_MODEL_NAME", default_model_name).strip()
+    return create_model(model_name=model_name, device=device, dtype=dtype)
