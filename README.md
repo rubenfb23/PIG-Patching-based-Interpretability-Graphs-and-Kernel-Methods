@@ -25,6 +25,26 @@ A Python framework for mechanistic interpretability that:
 git clone https://github.com/yourusername/PIG.git
 cd PIG
 
+# Install uv (recommended)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Sync project + dev dependencies
+uv sync --dev
+
+# Run CLI commands without manual venv activation
+uv run pig --help
+```
+
+If `uv` is not yet in your `PATH`, use:
+
+```bash
+~/.local/bin/uv sync --dev
+~/.local/bin/uv run pig --help
+```
+
+Legacy `pip` workflow is still supported:
+
+```bash
 # Create virtual environment
 python -m venv .venv
 source .venv/bin/activate
@@ -34,6 +54,49 @@ pip install -e .
 
 # For development
 pip install -e ".[dev]"
+```
+
+## CLI Entry Point
+
+Recommended invocation (no manual venv activation):
+
+```bash
+uv run pig pipeline
+```
+
+Direct invocation also works if your environment exposes `pig` in `PATH`:
+
+```bash
+pig pipeline
+```
+
+If you want to continue even if a stage fails:
+
+```bash
+pig pipeline --continue-on-error
+```
+
+### Using uv or pdm
+
+Both work with this repo because it is standard `pyproject.toml` + setuptools.
+
+- Recommended: `uv` for speed and simpler day-to-day workflow.
+- Use `pdm` if you need stronger dependency-group workflow and lockfile control.
+
+Typical commands:
+
+```bash
+# uv
+uv sync --dev
+uv run pig --help
+uv run pig pipeline
+uv run pig pipeline --continue-on-error
+
+# pdm
+pdm install -G dev
+pdm run pig pipeline
+# or using script alias from pyproject.toml
+pdm run pipeline
 ```
 
 ## Quick Start
@@ -75,6 +138,9 @@ print(f"Cross-validation accuracy: {results['accuracy_mean']:.2%}")
 The project includes validation scripts for each implementation phase:
 
 ```bash
+# Single entry point (recommended)
+pig pipeline
+
 # Phase 1: Model & Prompts
 python scripts/validate_story_1_1.py  # Model setup
 python scripts/validate_story_1_2.py  # Prompt generation
