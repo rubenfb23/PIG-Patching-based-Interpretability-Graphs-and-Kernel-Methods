@@ -9,6 +9,7 @@ This module generates the three output figures expected by the project:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 from matplotlib import pyplot as plt
@@ -16,6 +17,24 @@ from sklearn.decomposition import PCA
 
 from pig.embeddings import WLFeatureMatrix
 from pig.patching import NODE_TYPE_RES, PatchEffectDataset
+from pig.prompts import SliceLabel
+
+
+def _normalize_token_label(token: str, max_len: int = 16) -> str:
+    compact = token.replace("\n", "\\n").strip()
+    if compact == "":
+        compact = "<space>"
+    if len(compact) > max_len:
+        return f"{compact[: max_len - 1]}…"
+    return compact
+
+
+def _build_tick_labels(tokens: list[str]) -> list[str]:
+    labels: list[str] = []
+    for index, token in enumerate(tokens, start=1):
+        normalized = _normalize_token_label(token)
+        labels.append(f"t{index} ({normalized})")
+    return labels
 
 
 def _get_residual_component_index(dataset: PatchEffectDataset) -> int:
@@ -33,6 +52,7 @@ def _get_residual_component_index(dataset: PatchEffectDataset) -> int:
 def save_slice_heatmaps(
     dataset: PatchEffectDataset,
     output_dir: Path,
+    token_labels_by_slice: Optional[dict[SliceLabel, list[str]]] = None,
 ) -> list[Path]:
     """Save one average residual-effect heatmap per slice.
 
@@ -65,6 +85,15 @@ def save_slice_heatmaps(
         axis.set_title(f"Mean patch effects ({slice_label.corruption})")
         axis.set_xlabel("Token")
         axis.set_ylabel("Layer")
+
+        labels_for_slice = None
+        if token_labels_by_slice is not None:
+            labels_for_slice = token_labels_by_slice.get(slice_label)
+        if labels_for_slice:
+            labels = _build_tick_labels(labels_for_slice[:min_tokens])
+            axis.set_xticks(np.arange(len(labels)))
+            axis.set_xticklabels(labels, rotation=60, ha="right", fontsize=8)
+
         figure.colorbar(image, ax=axis, label="Effect")
         figure.tight_layout()
 
