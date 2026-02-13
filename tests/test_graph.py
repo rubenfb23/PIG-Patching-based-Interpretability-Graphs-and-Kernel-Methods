@@ -3,9 +3,48 @@
 import numpy as np
 import pytest
 
-from pig.graph import Edge, GraphBuilder, Node, PatchInfluenceGraph
+from pig.graph import (
+    Edge,
+    GraphBuilder,
+    Node,
+    PatchInfluenceGraph,
+    build_graphs_for_builders,
+    create_graph_builder,
+    get_available_graph_builders,
+)
 from pig.patching import ComponentSpec, PatchEffectDataset, PatchEffectTensor
 from pig.prompts import PromptPair, SliceLabel
+
+
+@pytest.fixture
+def registry_dataset():
+    """Create a compact dataset for registry/plugin tests."""
+    dataset = PatchEffectDataset()
+    slice_label = SliceLabel(task="ioi", corruption="name_swap")
+    component_axis = [ComponentSpec(node_type="res")]
+
+    np.random.seed(7)
+    for i in range(6):
+        effects = np.random.randn(3, 4, 1).astype(np.float32)
+        effects[0, :, 0] += 0.25 * effects[1, :, 0]
+
+        pair = PromptPair(
+            x_cln=f"Clean registry {i}",
+            x_crp=f"Corrupt registry {i}",
+            y_star="target",
+            slice_label=slice_label,
+            meta={},
+        )
+        tensor = PatchEffectTensor(
+            effects=effects,
+            component_axis=component_axis,
+            prompt_pair=pair,
+            base_score=-80.0,
+            clean_score=-70.0,
+        )
+        dataset.add(tensor)
+
+    return dataset
 
 
 class TestNode:
@@ -229,3 +268,44 @@ class TestGraphBuilder:
         assert len(graphs) == 1
         slice_label = SliceLabel(task="ioi", corruption="name_swap")
         assert slice_label in graphs
+
+
+class TestGraphBuilderRegistry:
+    """Tests for graph-builder registry and plugin loading."""
+
+    def test_list_graph_builders(self):
+        names = get_available_graph_builders()
+        assert "correlation_topk" in names
+        assert "abs_correlation_topk" in names
+
+    def test_create_graph_builder(self, registry_dataset):
+        builder = create_graph_builder("correlation_topk", k=3, enforce_direction=True)
+        slice_label = SliceLabel(task="ioi", corruption="name_swap")
+        graph = builder.build_from_slice(registry_dataset, slice_label)
+        assert isinstance(graph, PatchInfluenceGraph)
+        assert graph.metadata["graph_builder"] == "GraphBuilder"
+
+    def test_create_graph_builder_from_env(self, monkeypatch, registry_dataset):
+        monkeypatch.setenv("PIG_GRAPH_BUILDER", "abs_correlation_topk")
+        builder = create_graph_builder(k=3, enforce_direction=True)
+        slice_label = SliceLabel(task="ioi", corruption="name_swap")
+        graph = builder.build_from_slice(registry_dataset, slice_label)
+        assert graph.num_edges > 0
+
+    def test_create_unknown_builder_raises(self):
+        with pytest.raises(ValueError, match="Unknown graph builder"):
+            create_graph_builder("does_not_exist")
+
+    def test_build_graphs_for_builders(self, registry_dataset):
+        collections = build_graphs_for_builders(
+            registry_dataset,
+            builder_names=["correlation_topk", "abs_correlation_topk"],
+            k=3,
+            enforce_direction=True,
+        )
+        assert set(collections) == {"correlation_topk", "abs_correlation_topk"}
+
+        slice_label = SliceLabel(task="ioi", corruption="name_swap")
+        for builder_name, graphs in collections.items():
+            assert slice_label in graphs
+            assert graphs[slice_label].num_nodes > 0
