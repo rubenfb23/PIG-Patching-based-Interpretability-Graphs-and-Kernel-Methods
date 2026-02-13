@@ -72,10 +72,7 @@ def save_slice_heatmaps(
 
         _, min_tokens, _ = dataset.get_common_dimensions(slice_label)
         stacked = np.stack(
-            [
-                tensor.effects[:, :min_tokens, residual_index]
-                for tensor in tensors
-            ],
+            [tensor.effects[:, :min_tokens, residual_index] for tensor in tensors],
             axis=0,
         )
         mean_effects = np.mean(stacked, axis=0)
@@ -134,9 +131,7 @@ def save_pca_embeddings(
 
     figure, axis = plt.subplots(figsize=(7, 5))
     for label in unique_labels:
-        indices = [
-            index for index, value in enumerate(labels) if value == label
-        ]
+        indices = [index for index, value in enumerate(labels) if value == label]
         points = reduced[indices]
         axis.scatter(points[:, 0], points[:, 1], label=label, alpha=0.8)
 
