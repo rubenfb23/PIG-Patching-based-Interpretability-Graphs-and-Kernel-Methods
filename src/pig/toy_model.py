@@ -139,6 +139,13 @@ class ToyHookedModel(nn.Module):
             token_ids = token_ids[-self.max_seq_len :]
         return torch.tensor([token_ids], dtype=torch.long, device=self.device)
 
+    def get_prompt_tokens(self, prompt: str) -> list[str]:
+        """Return token strings for a prompt after model truncation."""
+        tokens = self._split_tokens(prompt)
+        if len(tokens) > self.max_seq_len:
+            tokens = tokens[-self.max_seq_len :]
+        return tokens
+
     def get_token_id(self, token: str) -> int:
         """Map a target token string to one ID."""
         pieces = self._split_tokens(token)

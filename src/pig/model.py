@@ -347,6 +347,20 @@ class HookedModel:
         """Tokenize text and return input IDs tensor."""
         return self.tokenizer.encode(text, return_tensors="pt").to(self.device)
 
+    def get_prompt_tokens(self, prompt: str) -> list[str]:
+        """Return decoded token strings for a prompt.
+
+        This is intended for diagnostics and visualization labels.
+        """
+        input_ids = self.tokenize(prompt)[0].tolist()
+        return [
+            self.tokenizer.decode(
+                [token_id],
+                clean_up_tokenization_spaces=False,
+            )
+            for token_id in input_ids
+        ]
+
     def get_token_id(self, token: str) -> int:
         """Get the token ID for a given token string."""
         # Handle tokens that may need space prefix
