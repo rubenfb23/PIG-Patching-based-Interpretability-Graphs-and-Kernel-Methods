@@ -142,6 +142,96 @@ src/pig/
 └── quantum.py     # Quantum feature maps + fidelity kernels
 ```
 
+## Model Architectures Used in PIG
+
+### GPT-2 (`HookedModel` backend)
+
+```mermaid
+flowchart TD
+    A[Text prompt] --> B[GPT-2 tokenizer]
+    B --> C[input_ids: 1 x seq_len]
+    C --> D[token embedding + positional embedding]
+    D --> E[Transformer Block 0]
+    E --> F[Transformer Block 1]
+    F --> G[...]
+    G --> H[Transformer Block n_layer-1]
+    H --> I[Final LayerNorm ln_f]
+    I --> J[lm_head projection to vocab]
+    J --> K[logits: 1 x seq_len x vocab_size]
+
+    subgraph BLK[GPT-2 block i: model.transformer.h[i]]
+        direction TB
+        L1[Input residual stream x]
+        L1 --> L2[LayerNorm]
+        L2 --> L3[Self-attention QKV]
+        L3 --> L4[Head concat -> c_proj]
+        L4 --> L5[Residual add]
+        L5 --> L6[LayerNorm]
+        L6 --> L7[MLP]
+        L7 --> L8[Residual add -> block output]
+    end
+
+    classDef hook fill:#eef,stroke:#446,stroke-width:1px
+    M1[[res hook\nblock output hidden_states]]:::hook
+    M2[[mlp hook\nblock.mlp output]]:::hook
+    M3[[att hook\npre-hook at block.attn.c_proj\n(per-head slices)]]:::hook
+
+    L8 -. capture/patch .-> M1
+    L7 -. capture/patch .-> M2
+    L4 -. capture/patch .-> M3
+```
+
+Detail captured by PIG patching API:
+
+- `res`: residual stream per `(layer, token)` from each transformer block output.
+- `mlp`: MLP output per `(layer, token)` from `block.mlp`.
+- `att`: per-head vectors per `(layer, token, head)` at `attn.c_proj` input.
+
+### Toy Transformer (`ToyHookedModel` backend)
+
+```mermaid
+flowchart TD
+    T0[Text prompt] --> T1[Regex tokenizer]
+    T1 --> T2[Hashed token IDs\nsha256 -> modulo vocab]
+    T2 --> T3[input_ids: 1 x seq_len]
+    T3 --> T4[token_embedding + position_embedding]
+    T4 --> T5[Tiny layer 0]
+    T5 --> T6[Tiny layer 1]
+    T6 --> T7[... up to n_layers-1]
+    T7 --> T8[LayerNorm ln_f]
+    T8 --> T9[lm_head]
+    T9 --> T10[logits: 1 x seq_len x vocab_size]
+
+    subgraph TBLK[_TinyLayer i (pre-norm)]
+        direction TB
+        U1[Input residual x]
+        U1 --> U2[ln_1]
+        U2 --> U3[Linear qkv -> q,k,v]
+        U3 --> U4[Causal masked attention per head]
+        U4 --> U5[Head outputs shape\n1 x seq_len x n_heads x head_dim]
+        U5 --> U6[out_proj on flattened heads]
+        U6 --> U7[Residual add]
+        U7 --> U8[ln_2]
+        U8 --> U9[fc_1 -> GELU -> fc_2]
+        U9 --> U10[Residual add -> block output]
+    end
+
+    classDef hook fill:#efe,stroke:#464,stroke-width:1px
+    V1[[att hook\nhead outputs before out_proj]]:::hook
+    V2[[mlp hook\nmlp_out before residual add]]:::hook
+    V3[[res hook\nblock output x]]:::hook
+
+    U5 -. capture/patch .-> V1
+    U9 -. capture/patch .-> V2
+    U10 -. capture/patch .-> V3
+```
+
+Default toy config (`TinyTransformerConfig`):
+
+- `vocab_size=512`, `max_seq_len=128`
+- `d_model=64`, `n_layers=2`, `n_heads=4`, `head_dim=16`
+- `mlp_dim=128`
+
 ## Core Concepts
 
 ### Paired Inputs

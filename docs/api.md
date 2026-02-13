@@ -5,6 +5,7 @@ This document provides detailed API documentation for all modules in the PIG (Pa
 ## Table of Contents
 
 - [pig.model](#pigmodel)
+- [pig.toy_model](#pigtoy_model)
 - [pig.prompts](#pigprompts)
 - [pig.patching](#pigpatching)
 - [pig.graph](#piggraph)
@@ -16,6 +17,50 @@ This document provides detailed API documentation for all modules in the PIG (Pa
 ## pig.model
 
 Model setup with activation capture and patching hooks.
+
+### GPT-2 Architecture (used by `HookedModel`)
+
+```mermaid
+flowchart TD
+    A[Prompt text] --> B[GPT-2 tokenizer]
+    B --> C[input_ids]
+    C --> D[token + positional embeddings]
+    D --> E[Block 0]
+    E --> F[Block 1]
+    F --> G[...]
+    G --> H[Block n_layer-1]
+    H --> I[ln_f]
+    I --> J[lm_head]
+    J --> K[logits]
+
+    subgraph BLK[Transformer Block i]
+        direction TB
+        X1[Residual input x]
+        X1 --> X2[LayerNorm]
+        X2 --> X3[Self-attention QKV]
+        X3 --> X4[c_proj]
+        X4 --> X5[Residual add]
+        X5 --> X6[LayerNorm]
+        X6 --> X7[MLP]
+        X7 --> X8[Residual add -> block output]
+    end
+
+    classDef hook fill:#eef,stroke:#446,stroke-width:1px
+    H1[[res node\n(layer, token)]]:::hook
+    H2[[mlp node\n(layer, token)]]:::hook
+    H3[[att node\n(layer, token, head)\npre-hook at attn.c_proj]]:::hook
+
+    X8 -. capture/patch .-> H1
+    X7 -. capture/patch .-> H2
+    X4 -. capture/patch .-> H3
+```
+
+Operational details in this repo:
+
+- Backed by `AutoModelForCausalLM` (default `gpt2`) with frozen parameters.
+- `res` hooks are registered on each `transformer.h[i]` block output.
+- `mlp` hooks are registered on `transformer.h[i].mlp` output.
+- `att` hooks are forward pre-hooks on `transformer.h[i].attn.c_proj`; tensors are split into per-head vectors using `head_dim = d_model / n_heads`.
 
 ### HookedModel
 
@@ -99,6 +144,63 @@ Compute score with one position patched from clean activations.
 - `position`: `(layer, token)` position to patch
 
 **Returns:** Logit value after patching
+
+---
+
+## pig.toy_model
+
+Tiny in-repo transformer backend used for fast tests and low-resource runs.
+
+### Toy Transformer Architecture (used by `ToyHookedModel`)
+
+```mermaid
+flowchart TD
+    T1[Prompt text] --> T2[Regex tokenization]
+    T2 --> T3[Hashed IDs\nsha256 -> modulo vocab]
+    T3 --> T4[input_ids]
+    T4 --> T5[token_embedding + position_embedding]
+    T5 --> T6[Tiny Layer 0]
+    T6 --> T7[Tiny Layer 1]
+    T7 --> T8[...]
+    T8 --> T9[ln_f]
+    T9 --> T10[lm_head]
+    T10 --> T11[logits]
+
+    subgraph TBLK[_TinyLayer i (pre-norm)]
+        direction TB
+        Y1[Residual input x]
+        Y1 --> Y2[ln_1]
+        Y2 --> Y3[qkv linear]
+        Y3 --> Y4[causal masked self-attention]
+        Y4 --> Y5[head outputs\n1 x seq_len x n_heads x head_dim]
+        Y5 --> Y6[out_proj]
+        Y6 --> Y7[Residual add]
+        Y7 --> Y8[ln_2]
+        Y8 --> Y9[fc_1 -> GELU -> fc_2]
+        Y9 --> Y10[Residual add -> block output]
+    end
+
+    classDef hook fill:#efe,stroke:#464,stroke-width:1px
+    TH1[[att node\n(layer, token, head)]]:::hook
+    TH2[[mlp node\n(layer, token)]]:::hook
+    TH3[[res node\n(layer, token)]]:::hook
+
+    Y5 -. capture/patch .-> TH1
+    Y9 -. capture/patch .-> TH2
+    Y10 -. capture/patch .-> TH3
+```
+
+Default `TinyTransformerConfig` values:
+
+- `vocab_size=512`, `max_seq_len=128`
+- `d_model=64`, `n_layers=2`, `n_heads=4`, `head_dim=16`
+- `mlp_dim=128`, `seed=0`
+
+Key classes:
+
+- `TinyTransformerConfig`: dataclass that defines model dimensions.
+- `_TinyLayer`: one pre-norm transformer block.
+- `ToyHookedModel`: API-compatible backend with `cache_clean_components`, `score`, `patched_score`, and `patched_score_multi`.
 
 ---
 
