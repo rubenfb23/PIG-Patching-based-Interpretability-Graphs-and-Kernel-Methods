@@ -52,6 +52,9 @@ Primary package:
 - `src/pig/prompts.py` — IOI prompt/corruption generators.
 - `src/pig/patching.py` — patch effect computation + datasets.
 - `src/pig/graph.py` — graph construction from effects.
+- `src/pig/graphs/registry.py` — strategy registry/discovery for graph builders.
+- `src/pig/graphs/correlation_topk.py` — default correlation + top-k strategy.
+- `src/pig/graphs/abs_correlation_topk.py` — absolute-correlation strategy.
 - `src/pig/embeddings.py` — WL embeddings and feature utilities.
 - `src/pig/kernels.py` — classical kernel workflows.
 - `src/pig/quantum.py` — quantum kernel/fidelity workflows.

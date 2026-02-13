@@ -101,7 +101,7 @@ pdm run pipeline
 from pig.model import create_model
 from pig.prompts import create_ioi_dataset
 from pig.patching import compute_patch_effects
-from pig.graph import GraphBuilder
+from pig.graph import create_graph_builder
 from pig.embeddings import compute_wl_features
 from pig.kernels import train_classical_baseline
 
@@ -117,7 +117,11 @@ dataset = create_ioi_dataset(n_examples=50, corruption="name_swap", seed=42)
 effects = compute_patch_effects(model, dataset)
 
 # 4. Build graphs from patch effects
-builder = GraphBuilder(k=5, enforce_direction=True)
+builder = create_graph_builder(
+    builder_name="correlation_topk",
+    k=5,
+    enforce_direction=True,
+)
 graphs = builder.build_all(effects)
 
 # 5. Compute WL graph embeddings
@@ -139,12 +143,18 @@ src/pig/
 │   ├── layers.py
 │   ├── model.py
 │   └── trainer.py
+├── graphs/        # Graph strategy plugins (one file per strategy)
+│   ├── base.py
+│   ├── registry.py
+│   ├── correlation_topk.py
+│   └── abs_correlation_topk.py
 ├── prompts.py     # Prompt generators (IOI task, corruption strategies)
 ├── patching.py    # Patch-effect tensor computation & caching
 ├── graph.py       # Graph construction from effects
 ├── embeddings.py  # Weisfeiler-Lehman graph embeddings
 ├── kernels.py     # Classical SVM classifiers (linear, RBF)
-└── quantum.py     # Quantum feature maps + fidelity kernels
+├── quantum.py     # Quantum feature maps + fidelity kernels
+└── visualization.py  # Heatmaps, PCA, and reporting outputs
 ```
 
 ## Model Architectures Used in PIG
@@ -363,15 +373,27 @@ for tensor in dataset:
 ### `pig.graph` - Graph Construction
 
 ```python
-from pig.graph import GraphBuilder
+from pig.graph import create_graph_builder, get_available_graph_builders
 
-builder = GraphBuilder(k=5, enforce_direction=True)
+print(get_available_graph_builders())
+# ['abs_correlation_topk', 'correlation_topk', ...]
+
+builder = create_graph_builder(
+    builder_name="correlation_topk",
+    k=5,
+    enforce_direction=True,
+)
 
 # Per-slice graphs (correlation-based)
 graphs = builder.build_all(dataset)
 
 # Per-example graphs (for classification)
 graphs_with_labels = builder.build_per_example(dataset)
+```
+
+```bash
+# Run the full pipeline with a selected graph strategy
+uv run pig pipeline --model-name toy_transformer --graph-builder correlation_topk
 ```
 
 ### `pig.embeddings` - WL Features
@@ -425,6 +447,31 @@ clf, cv_results, _ = train_quantum_kernel_baseline(
     shots=500,
     reduction="pca",
 )
+```
+
+### `pig.visualization` - Patching Heatmaps (Layer x Token)
+
+```python
+from pig.visualization import (
+    prepare_patching_heatmap_inputs,
+    plot_patching_heatmap_layer_token,
+)
+
+E, nodes_df, examples_df = prepare_patching_heatmap_inputs(dataset)
+
+result = plot_patching_heatmap_layer_token(
+    E=E,
+    nodes_df=nodes_df,
+    examples_df=examples_df,
+    slice_filter="ioi:name_swap",  # or ["ioi:name_swap", "ioi:abba"]
+    component="resid",
+    agg="mean",                    # "mean" or "median"
+    subset="all",                  # or "clean_correct_corrupted_wrong"
+)
+
+print(result["output_png"])
+print(result["output_html"])
+print(result["output_json"])
 ```
 
 ## Implementation Status
