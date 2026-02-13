@@ -1,0 +1,31 @@
+{
+  "aggregation": "mean",
+  "center": 0.0,
+  "component": "res",
+  "contours": {
+    "enabled": false,
+    "percentile": 95.0,
+    "threshold": null
+  },
+  "example_filters": {},
+  "matrix_shape": [
+    12,
+    11
+  ],
+  "num_examples_selected": 8,
+  "num_examples_total": 16,
+  "num_nodes_component": 132,
+  "num_nodes_total": 132,
+  "outputs": {
+    "html": "reports/html/A_heatmap_layer_token__ioi-name_swap.html",
+    "json": "reports/metadata/A_heatmap_layer_token__ioi-name_swap.json",
+    "png": "reports/figures/A_heatmap_layer_token__ioi-name_swap.png"
+  },
+  "robust_percentile": 99.0,
+  "slice_filter": [
+    "ioi:name_swap"
+  ],
+  "subset": "all",
+  "vmax": 3.2276620864868164,
+  "vmin": -3.2276620864868164
+}
