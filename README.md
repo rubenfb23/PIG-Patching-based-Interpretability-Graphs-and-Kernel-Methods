@@ -133,7 +133,12 @@ print(f"Cross-validation accuracy: {results['accuracy_mean']:.2%}")
 ```
 src/pig/
 ├── model.py       # HookedModel: activation capture & patching
-├── toy_model.py   # ToyHookedModel: tiny local transformer for fast tests
+├── toy_model/     # ToyHookedModel package: tiny local transformer for fast tests
+│   ├── __init__.py
+│   ├── config.py
+│   ├── layers.py
+│   ├── model.py
+│   └── trainer.py
 ├── prompts.py     # Prompt generators (IOI task, corruption strategies)
 ├── patching.py    # Patch-effect tensor computation & caching
 ├── graph.py       # Graph construction from effects
@@ -288,7 +293,12 @@ patched = model.patched_score(
 ### `pig.toy_model` - Ultra-Simple Local Transformer (for tests)
 
 ```python
-from pig.toy_model import ToyHookedModel, TinyTransformerConfig
+from pig.toy_model import (
+    TinyTrainingConfig,
+    TinyTransformerConfig,
+    ToyHookedModel,
+    train_toy_model,
+)
 
 toy = ToyHookedModel(
     config=TinyTransformerConfig(
@@ -296,6 +306,24 @@ toy = ToyHookedModel(
     ),
     device="cpu",
 )
+
+history = train_toy_model(
+    toy,
+    texts=[
+        "Alice gave the book to Bob .",
+        "Bob gave the book to Alice .",
+    ],
+    config=TinyTrainingConfig(epochs=3, learning_rate=1e-3),
+)
+print(history[-1].mean_loss)
+```
+
+```bash
+# Train directly from a corpus file (one sample per line)
+uv run python -m pig.toy_model.trainer \
+  --data-file data/toy_corpus.txt \
+  --epochs 10 \
+  --save-path outputs/toy_model.pt
 ```
 
 ### `pig.prompts` - Prompt Generation

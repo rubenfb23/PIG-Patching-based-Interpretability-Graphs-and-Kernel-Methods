@@ -44,7 +44,11 @@ Still evolving:
 Primary package:
 
 - `src/pig/model.py` — model abstraction and hooks.
-- `src/pig/toy_model.py` — tiny local transformer backend.
+- `src/pig/toy_model/model.py` — tiny local transformer backend implementation.
+- `src/pig/toy_model/config.py` — toy model and training configs.
+- `src/pig/toy_model/layers.py` — tiny block and tokenization helpers.
+- `src/pig/toy_model/trainer.py` — toy model training utilities.
+- `src/pig/toy_model/__init__.py` — public exports for toy model classes.
 - `src/pig/prompts.py` — IOI prompt/corruption generators.
 - `src/pig/patching.py` — patch effect computation + datasets.
 - `src/pig/graph.py` — graph construction from effects.
