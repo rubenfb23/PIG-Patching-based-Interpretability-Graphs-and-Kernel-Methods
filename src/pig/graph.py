@@ -12,6 +12,7 @@ Key features:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -20,6 +21,9 @@ from numpy.typing import NDArray
 
 from pig.patching import ComponentSpec, PatchEffectDataset
 from pig.prompts import SliceLabel
+
+DEFAULT_GRAPH_BUILDER = "correlation_topk"
+GRAPH_BUILDER_ENV_VAR = "PIG_GRAPH_BUILDER"
 
 
 @dataclass(frozen=True)
@@ -375,6 +379,7 @@ class GraphBuilder:
                 "k": self.k,
                 "enforce_direction": self.enforce_direction,
                 "num_examples": len(tensors),
+                "graph_builder": self.__class__.__name__,
             },
         )
 
@@ -457,15 +462,56 @@ class GraphBuilder:
                 slice_label=tensor.prompt_pair.slice_label,
                 num_layers=num_layers,
                 num_tokens=num_tokens,
-                metadata={"k": self.k, "example_based": True},
+                metadata={
+                    "k": self.k,
+                    "example_based": True,
+                    "graph_builder": self.__class__.__name__,
+                },
             )
             graphs.append((graph, tensor.prompt_pair.slice_label))
 
         return graphs
 
 
+def get_available_graph_builders() -> list[str]:
+    """List available graph strategy names discovered in `pig.graphs`."""
+    from pig.graphs.registry import list_graph_builders
+
+    return list_graph_builders()
+
+
+def create_graph_builder(
+    builder_name: str | None = None,
+    *,
+    k: int = 5,
+    enforce_direction: bool = True,
+    min_weight: float = 0.0,
+) -> GraphBuilder:
+    """Create a graph builder by registered strategy name.
+
+    If `builder_name` is omitted, reads `PIG_GRAPH_BUILDER` and falls back
+    to `"correlation_topk"`.
+    """
+    resolved_name = (
+        builder_name
+        or os.getenv(GRAPH_BUILDER_ENV_VAR, DEFAULT_GRAPH_BUILDER)
+    ).strip().lower()
+    if not resolved_name:
+        resolved_name = DEFAULT_GRAPH_BUILDER
+
+    from pig.graphs.registry import create_graph_builder as _create_graph_builder
+
+    return _create_graph_builder(
+        resolved_name,
+        k=k,
+        enforce_direction=enforce_direction,
+        min_weight=min_weight,
+    )
+
+
 def build_graphs(
     dataset: PatchEffectDataset,
+    builder_name: str | None = None,
     k: int = 5,
     enforce_direction: bool = True,
 ) -> dict[SliceLabel, PatchInfluenceGraph]:
@@ -473,11 +519,37 @@ def build_graphs(
 
     Args:
         dataset: Dataset containing patch-effect tensors
+        builder_name: Registered builder name (defaults to env/default)
         k: Number of top edges per node
         enforce_direction: Whether to enforce direction constraint
 
     Returns:
         Dictionary mapping slice labels to graphs
     """
-    builder = GraphBuilder(k=k, enforce_direction=enforce_direction)
+    builder = create_graph_builder(
+        builder_name=builder_name,
+        k=k,
+        enforce_direction=enforce_direction,
+    )
     return builder.build_all(dataset)
+
+
+def build_graphs_for_builders(
+    dataset: PatchEffectDataset,
+    builder_names: list[str],
+    *,
+    k: int = 5,
+    enforce_direction: bool = True,
+    min_weight: float = 0.0,
+) -> dict[str, dict[SliceLabel, PatchInfluenceGraph]]:
+    """Build one graph collection per registered builder name."""
+    collections: dict[str, dict[SliceLabel, PatchInfluenceGraph]] = {}
+    for name in builder_names:
+        builder = create_graph_builder(
+            builder_name=name,
+            k=k,
+            enforce_direction=enforce_direction,
+            min_weight=min_weight,
+        )
+        collections[name] = builder.build_all(dataset)
+    return collections
