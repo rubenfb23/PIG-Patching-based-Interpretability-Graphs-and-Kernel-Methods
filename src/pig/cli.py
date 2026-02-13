@@ -23,6 +23,7 @@ VALIDATION_SEQUENCE = [
 ]
 
 MODEL_OUTPUT_SUFFIXES = ("_gpt2", "_toy")
+GRAPH_BUILDER_ENV_VAR = "PIG_GRAPH_BUILDER"
 
 
 def _repo_root() -> Path:
@@ -104,7 +105,11 @@ def _suffix_output_files(model_name: str) -> int:
     return renamed_count
 
 
-def _run_script(script_name: str, model_name: str) -> int:
+def _run_script(
+    script_name: str,
+    model_name: str,
+    graph_builder: str | None = None,
+) -> int:
     script_path = _scripts_dir() / script_name
     if not script_path.exists():
         print(f"[FAIL] Missing script: {script_path}")
@@ -114,16 +119,24 @@ def _run_script(script_name: str, model_name: str) -> int:
     print(f"Running {script_name}")
     print(f"{'=' * 72}")
 
+    env = {**os.environ, "PIG_MODEL_NAME": model_name}
+    if graph_builder:
+        env[GRAPH_BUILDER_ENV_VAR] = graph_builder
+
     result = subprocess.run(
         [sys.executable, str(script_path)],
         cwd=str(_repo_root()),
-        env={**os.environ, "PIG_MODEL_NAME": model_name},
+        env=env,
         check=False,
     )
     return result.returncode
 
 
-def run_pipeline(model_name: str, stop_on_failure: bool = True) -> int:
+def run_pipeline(
+    model_name: str,
+    stop_on_failure: bool = True,
+    graph_builder: str | None = None,
+) -> int:
     start_time = time.time()
     failures: list[tuple[str, int]] = []
     output_snapshot = _snapshot_suffixed_outputs()
@@ -132,9 +145,15 @@ def run_pipeline(model_name: str, stop_on_failure: bool = True) -> int:
     print(f"Python: {sys.executable}")
     print(f"Repo: {_repo_root()}")
     print(f"Model: {model_name}")
+    if graph_builder:
+        print(f"Graph builder: {graph_builder}")
 
     for script_name in VALIDATION_SEQUENCE:
-        exit_code = _run_script(script_name, model_name)
+        exit_code = _run_script(
+            script_name,
+            model_name,
+            graph_builder=graph_builder,
+        )
         if exit_code != 0:
             failures.append((script_name, exit_code))
             print(f"[FAIL] {script_name} exited with code {exit_code}")
@@ -182,6 +201,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default="gpt2",
         help="Model identifier to use (e.g. gpt2, toy_transformer)",
     )
+    pipeline_parser.add_argument(
+        "--graph-builder",
+        default=None,
+        help=(
+            "Registered graph builder strategy "
+            "(e.g. correlation_topk, abs_correlation_topk)"
+        ),
+    )
 
     return parser
 
@@ -194,6 +221,7 @@ def main() -> None:
         code = run_pipeline(
             model_name=args.model_name,
             stop_on_failure=not args.continue_on_error,
+            graph_builder=args.graph_builder,
         )
         raise SystemExit(code)
 
