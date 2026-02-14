@@ -508,3 +508,113 @@ See [LICENSE](LICENSE).
 This work is tutored by David Olivieri from University of Vigo.
 
 Ruben Fernandez-Boullon
+
+## CLMI Suite (GPT-2 Continual Learning + Mechanistic Interpretability)
+
+This repository also includes a full, reproducible research-code pipeline under `src/clmi/` for:
+
+1. Synthetic A/B dictionary tasks with controlled overlap/conflict.
+2. Continual-learning cycles (`A->B` and `A->B->A`) on GPT-2.
+3. Layerwise causal subspaces and projectors (`U_{l,T}`, `P_{l,T}`).
+4. Operator and functional non-commutativity metrics.
+5. Task kernels (`k_proj`, `k_NC`, `k_func`) and downstream analysis.
+6. Forgetting/interference prediction and curriculum experiments.
+7. Mitigations (LoRA vs full FT, freeze high-NC layers, anchor regularization).
+8. Robustness under input/embedding noise with automatic figures and tables.
+
+### Hypothesis
+
+The central hypothesis is: **non-commutativity between task-induced causal subspaces predicts continual-learning interference/forgetting and localizes conflict by layer**.
+
+### CLMI Layout
+
+```text
+src/clmi/
+  data/        # synthetic tasks + clean GPT-2 token selection
+  model/       # GPT-2 loader, full/LoRA fine-tuning, interventions
+  causal/      # logit-diff, subspaces/projectors, AB vs BA patching
+  metrics/     # forgetting/hysteresis, non-commutativity, robustness
+  kernels/     # k_proj, k_NC, k_func, curriculum, KRR prediction
+  viz/         # matplotlib figures
+  utils/       # typed config, seeds, IO/cache
+scripts/
+  run_pair.py
+  run_experiments.py
+```
+
+### Smoke Run (CPU)
+
+```bash
+python scripts/run_experiments.py \
+  --model gpt2 \
+  --device cpu \
+  --seeds 1 \
+  --overlaps 0 \
+  --n_pairs_per_overlap 1 \
+  --k 8 \
+  --beta 0.2 \
+  --smoke
+```
+
+If you already have model weights cached locally and want to avoid network access:
+
+```bash
+python scripts/run_experiments.py \
+  --model gpt2 \
+  --device cpu \
+  --seeds 1 \
+  --overlaps 0 \
+  --n_pairs_per_overlap 1 \
+  --k 8 \
+  --beta 0.2 \
+  --smoke \
+  --local-files-only
+```
+
+### Full Suite
+
+```bash
+python scripts/run_experiments.py \
+  --model gpt2 \
+  --device auto \
+  --seeds 5 \
+  --overlaps 0 0.25 0.5 0.75 \
+  --n_pairs_per_overlap 10 \
+  --k 16 \
+  --beta 0.2
+```
+
+`run_experiments.py` calls `run_pair.py` repeatedly and writes:
+
+- `results/tables/summary.csv`
+- `results/tables/nc_layers_all.csv`
+- `results/runs/<run_id>/...` (config, checkpoints, curves, robustness, per-layer NC, bases)
+- `results/figures/*.png`
+
+### Core Output Columns
+
+`summary.csv` includes at least:
+
+- `overlap, seed, pair_id, ft_mode, mitigation`
+- `AccA_MA, AccA_MAB, AccB_MAB, forgettingA`
+- `remanenceA, coercivity_steps, hysteresis_area`
+- `NC_global, mean_NC_layers, KL_AB_BA`
+- `k_proj, k_NC, k_func`
+- `grad_overlap, random_nc_control`
+
+Additional derived tables produced by `run_experiments.py`:
+
+- `results/tables/kernel_predict_forgetting.csv` (kernel ridge predictions)
+- `results/tables/kernel_predict_metrics.json` (RMSE/R2)
+- `results/tables/curriculum_knc.csv` (greedy anti-conflict order)
+- `results/tables/task_clusters_knc.csv` (spectral clustering from kernel matrix)
+
+### Figure Guide
+
+Generated automatically in `results/figures/`:
+
+1. `scatter_nc_vs_forgetting.png`: tests whether larger `NC_global` associates with larger forgetting.
+2. `heatmap_nc_per_layer_by_overlap.png`: layer conflict localization by overlap.
+3. `hysteresis_overlap_<s>.png`: recovery dynamics in `A->B->A`.
+4. `kernel_matrix_kproj.png` and `kernel_matrix_knc.png`: task-kernel geometry.
+5. `mitigation_comparison_bars.png`: average forgetting by mitigation mode.
