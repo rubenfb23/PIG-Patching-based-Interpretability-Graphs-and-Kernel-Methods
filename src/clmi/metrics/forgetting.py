@@ -17,14 +17,29 @@ def compute_weight_distance(
     model_a: PreTrainedModel,
     model_b: PreTrainedModel,
 ) -> dict[str, float]:
-    """L2 and cosine distance between two model parameter states."""
+    """L2 and cosine distance between two model parameter states.
+
+    When one model has extra parameters (e.g. LoRA adapters), only the
+    parameters whose names appear in *both* models are compared.
+    PEFT prefixes (``base_model.model.``) are stripped so that a
+    PeftModel can be compared directly against a plain checkpoint.
+    """
+
+    def _strip_prefix(name: str) -> str:
+        """Remove PEFT wrapper prefix from parameter name."""
+        prefix = "base_model.model."
+        return name[len(prefix):] if name.startswith(prefix) else name
+
+    params_a = {_strip_prefix(n): p for n, p in model_a.named_parameters()}
+    params_b = {_strip_prefix(n): p for n, p in model_b.named_parameters()}
+    shared = sorted(params_a.keys() & params_b.keys())
+    if not shared:
+        raise ValueError("Models share no parameter names")
     flat_a: list[torch.Tensor] = []
     flat_b: list[torch.Tensor] = []
-    for (_, pa), (_, pb) in zip(
-        model_a.named_parameters(), model_b.named_parameters(), strict=True
-    ):
-        flat_a.append(pa.detach().reshape(-1).float())
-        flat_b.append(pb.detach().reshape(-1).float())
+    for name in shared:
+        flat_a.append(params_a[name].detach().cpu().reshape(-1).float())
+        flat_b.append(params_b[name].detach().cpu().reshape(-1).float())
     va = torch.cat(flat_a)
     vb = torch.cat(flat_b)
     l2 = float(torch.norm(va - vb).item())

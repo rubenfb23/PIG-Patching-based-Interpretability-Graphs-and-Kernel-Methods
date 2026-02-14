@@ -169,12 +169,15 @@ def _build_batch_for_grad(
     return input_ids, attention_mask, labels
 
 
-def _flatten_gradients(model) -> torch.Tensor:
+def _flatten_gradients(model, to_cpu: bool = True) -> torch.Tensor:
     grads = []
     for param in model.parameters():
         if param.grad is None:
             continue
-        grads.append(param.grad.detach().reshape(-1))
+        g = param.grad.detach().reshape(-1)
+        if to_cpu:
+            g = g.cpu()
+        grads.append(g)
     if not grads:
         return torch.zeros(1)
     return torch.cat(grads)
@@ -193,17 +196,22 @@ def compute_gradient_overlap_baseline(
     batch_a = list(task_pair.task_a.examples[:batch_size])
     batch_b = list(task_pair.task_b.examples[:batch_size])
 
+    # Compute grad_a and move to CPU before computing grad_b to avoid OOM
     model.zero_grad(set_to_none=True)
     in_a, att_a, lab_a = _build_batch_for_grad(batch_a, tokenizer, device)
     loss_a = model(input_ids=in_a, attention_mask=att_a, labels=lab_a, use_cache=False).loss
     loss_a.backward()
-    grad_a = _flatten_gradients(model)
+    grad_a = _flatten_gradients(model, to_cpu=True)
+    del in_a, att_a, lab_a, loss_a
 
     model.zero_grad(set_to_none=True)
+    if device != "cpu":
+        torch.cuda.empty_cache()
     in_b, att_b, lab_b = _build_batch_for_grad(batch_b, tokenizer, device)
     loss_b = model(input_ids=in_b, attention_mask=att_b, labels=lab_b, use_cache=False).loss
     loss_b.backward()
-    grad_b = _flatten_gradients(model)
+    grad_b = _flatten_gradients(model, to_cpu=True)
+    del in_b, att_b, lab_b, loss_b
 
     model.zero_grad(set_to_none=True)
 
@@ -600,16 +608,19 @@ def main() -> None:
         model, tokenizer, pair.task_b, device=device, top_k=5,
     )["acc_exact"]
 
-    # Weight-space distances between phases (load checkpoints)
+    # Weight-space distances between phases (load checkpoints to CPU to avoid OOM)
     from clmi.model.gpt2_loader import load_model_tokenizer as _reload
-    _m0, _, _ = _reload(model_name=str(ckp_dir / "M0"), device=device, local_files_only=True)
-    _ma, _, _ = _reload(model_name=str(ckp_dir / "MA"), device=device, local_files_only=True)
-    _mab, _, _ = _reload(model_name=str(ckp_dir / "MAB"), device=device, local_files_only=True)
+    _m0, _, _ = _reload(model_name=str(ckp_dir / "M0"), device="cpu", local_files_only=True)
+    _ma, _, _ = _reload(model_name=str(ckp_dir / "MA"), device="cpu", local_files_only=True)
+    _mab, _, _ = _reload(model_name=str(ckp_dir / "MAB"), device="cpu", local_files_only=True)
     wdist_m0_ma = compute_weight_distance(_m0, _ma)
+    del _m0  # free eagerly
     wdist_ma_mab = compute_weight_distance(_ma, _mab)
+    del _ma
     wdist_mab_maba = compute_weight_distance(model, _mab)    # MABA vs MAB
-    wdist_m0_maba = compute_weight_distance(_m0, model)      # MABA vs M0 (cycle closure)
-    del _m0, _ma, _mab  # free memory
+    wdist_m0_maba_m0, _, _ = _reload(model_name=str(ckp_dir / "M0"), device="cpu", local_files_only=True)
+    wdist_m0_maba = compute_weight_distance(wdist_m0_maba_m0, model)  # MABA vs M0 (cycle closure)
+    del _mab, wdist_m0_maba_m0  # free memory
 
     eval_curve = (
         result_a2.history["eval_acc_exact"].dropna().astype(float).tolist()
