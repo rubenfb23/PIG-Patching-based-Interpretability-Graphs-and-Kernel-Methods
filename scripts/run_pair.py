@@ -95,6 +95,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--anchor-weight", type=float, default=0.1)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=5e-5)
+    parser.add_argument(
+        "--learning-rate-lora",
+        type=float,
+        default=None,
+        help="Override learning rate when ft_mode=lora (default: 10x --learning-rate).",
+    )
     parser.add_argument("--max-steps-a", type=int, default=120)
     parser.add_argument("--max-steps-b", type=int, default=120)
     parser.add_argument("--max-steps-a2", type=int, default=120)
@@ -267,18 +273,28 @@ def main() -> None:
     run_id = _make_run_id(args)
     seed_everything(args.seed)
 
+    # Resolve per-mode learning rate: LoRA typically needs higher LR
+    effective_lr = args.learning_rate
+    if args.ft_mode == "lora":
+        if args.learning_rate_lora is not None:
+            effective_lr = args.learning_rate_lora
+        else:
+            effective_lr = args.learning_rate * 10  # LoRA default: 10x base LR
+
     model, tokenizer, device = load_model_tokenizer(
         model_name=args.model,
         device=args.device,
         local_files_only=args.local_files_only,
     )
 
+    # Incorporate pair_id into seed so different pairs produce different tasks
+    task_seed = args.seed * 10_000 + args.pair_id
     pair = generate_task_pair(
         tokenizer,
         overlap=args.overlap,
         n_keys=args.n_keys,
         n_values=args.n_values,
-        seed=args.seed,
+        seed=task_seed,
         prompt_template="Q: {X}\nA:",
         max_answer_tokens=2,
     )
@@ -291,6 +307,7 @@ def main() -> None:
             task_a=pair.task_b,
             task_b=pair.task_a,
             shared_keys=pair.shared_keys,
+            conflict_keys=pair.conflict_keys,
         )
 
     layers = tuple(range(model.config.n_layer))
@@ -307,7 +324,7 @@ def main() -> None:
             model_name=args.model,
             device=device,
             seed=args.seed,
-            learning_rate=args.learning_rate,
+            learning_rate=effective_lr,
             batch_size=args.batch_size,
             max_steps=max(args.max_steps_a, args.max_steps_b, args.max_steps_a2),
             eval_every=args.eval_every,

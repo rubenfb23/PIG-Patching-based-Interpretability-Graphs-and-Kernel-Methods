@@ -59,6 +59,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-values", type=int, default=400)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=5e-5)
+    parser.add_argument(
+        "--learning-rate-lora",
+        type=float,
+        default=None,
+        help="Override learning rate for LoRA runs (default: 10x --learning-rate).",
+    )
     parser.add_argument("--max-steps-a", type=int, default=120)
     parser.add_argument("--max-steps-b", type=int, default=120)
     parser.add_argument("--max-steps-a2", type=int, default=120)
@@ -150,6 +156,8 @@ def _build_run_pair_cmd(args: argparse.Namespace, overlap: float, seed: int, pai
         "--protocol",
         protocol,
     ]
+    if args.learning_rate_lora is not None:
+        cmd += ["--learning-rate-lora", str(args.learning_rate_lora)]
     if args.local_files_only:
         cmd.append("--local-files-only")
     if args.smoke:

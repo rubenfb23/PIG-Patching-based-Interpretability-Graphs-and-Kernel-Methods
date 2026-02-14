@@ -15,12 +15,12 @@
 # ETA         ≈ 360 × 4 min / 60 ≈ 24 h
 #
 # Training params (tuned for convergence on GPT-2 key-value tasks):
-#   steps   = 500 per phase (A, B, A2)
+#   steps   = 500 per phase (A, B, A2) — ~38 epochs over 400 keys at bs=32
 #   batch   = 32  (3090 has 24 GB, GPT-2 fits easily with bs=32)
-#   lr      = 3e-5 (slightly lower than default for stability)
+#   lr      = 3e-5 (Full), 3e-4 (LoRA — 10x, passed via --learning-rate-lora)
 #   eval    = every 20 steps → 25 eval points per phase (smooth curves)
 #   n-keys  = 400, n-values = 400 (default, decent difficulty)
-#   k       = 16  (number of key-value mappings per task)
+#   k       = 16  (subspace rank for projectors)
 # ===========================================================================
 
 set -euo pipefail
@@ -36,6 +36,11 @@ mkdir -p results/tables results/figures results/runs
 
 # Remove stale summary to start fresh (comment out if using --resume)
 # rm -f results/tables/summary.csv
+
+# --- Pre-download GPT-2 into HuggingFace cache (once, with network) ---
+echo "Ensuring GPT-2 is in local cache…"
+python scripts/ensure_model_cached.py --model gpt2
+echo ""
 
 LOG="results/run_serious_$(date +%Y%m%d_%H%M%S).log"
 
@@ -59,10 +64,12 @@ python scripts/run_experiments.py \
     --n-values 400 \
     --batch-size 32 \
     --learning-rate 3e-5 \
+    --learning-rate-lora 3e-4 \
     --max-steps-a 500 \
     --max-steps-b 500 \
     --max-steps-a2 500 \
     --eval-every 20 \
+    --local-files-only \
     --continue-on-error \
     --resume \
     2>&1 | tee "$LOG"
