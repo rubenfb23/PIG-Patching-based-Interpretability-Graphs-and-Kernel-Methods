@@ -70,6 +70,50 @@ If you want to continue even if a stage fails:
 pig pipeline --continue-on-error
 ```
 
+## GPT-2 Teacher Distillation (GSM8K)
+
+Install extra packages for this workflow:
+
+```bash
+uv pip install datasets accelerate
+```
+
+Generate distilled SFT data with `openai/gpt-oss-20b` as teacher:
+
+```bash
+uv run python -m gpt2.distill_gsm8k \
+  --teacher-model openai/gpt-oss-20b \
+  --output-path outputs/gsm8k_distilled_gptoss20b.jsonl \
+  --max-examples 2000 \
+  --batch-size 2
+```
+
+Then fine-tune GPT-2 student with the generated JSONL (`text` field):
+
+```bash
+PYTHONPATH=src uv run torchrun --standalone --nproc_per_node=4 \
+  -m gpt2.finetuning \
+  --data-path outputs/gsm8k_distilled_gptoss20b.jsonl \
+  --text-key text \
+  --model-name gpt2 \
+  --output-dir outputs/gpt2_gsm8k_distilled \
+  --seq-len 512 \
+  --epochs 3
+```
+
+One-shot wrapper (runs both phases in sequence):
+
+```bash
+src/gpt2/run_distill_and_finetune.sh
+```
+
+By default it uses the full GSM8K train split (`--max-examples -1`).  
+For a shorter run:
+
+```bash
+src/gpt2/run_distill_and_finetune.sh --max-examples 2000
+```
+
 ### Using uv or pdm
 
 Both work with this repo because it is standard `pyproject.toml` + setuptools.
