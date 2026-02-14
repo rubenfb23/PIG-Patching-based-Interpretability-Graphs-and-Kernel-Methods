@@ -639,6 +639,10 @@ def main() -> None:
     wdist_m0_maba = compute_weight_distance(wdist_m0_maba_m0, model)  # MABA vs M0 (cycle closure)
     del _mab, wdist_m0_maba_m0  # free memory
 
+    # Clean up checkpoint directory to avoid accumulating ~2 GB per run on disk.
+    import shutil
+    shutil.rmtree(ckp_dir, ignore_errors=True)
+
     eval_curve = (
         result_a2.history["eval_acc_exact"].dropna().astype(float).tolist()
         if "eval_acc_exact" in result_a2.history.columns
