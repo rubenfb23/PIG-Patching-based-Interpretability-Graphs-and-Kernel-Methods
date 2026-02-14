@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from clmi.utils.torch_helpers import kl_divergence
+
 
 def compute_operator_noncommutativity(
     projectors_a: dict[int, np.ndarray],
@@ -48,7 +50,21 @@ def compute_prob_kl(
     eps: float = 1e-8,
 ) -> float:
     """Compute mean KL(p || q) over batch."""
-    p_safe = torch.clamp(p, min=eps)
-    q_safe = torch.clamp(q, min=eps)
-    kl = torch.sum(p_safe * (torch.log(p_safe) - torch.log(q_safe)), dim=-1)
-    return float(kl.mean().item())
+    return float(kl_divergence(p, q, eps=eps).mean().item())
+
+
+def compute_jensen_shannon(
+    p: torch.Tensor,
+    q: torch.Tensor,
+    eps: float = 1e-8,
+) -> float:
+    """Compute mean Jensen-Shannon divergence over batch.
+
+    JSD(p, q) = 0.5 * KL(p || m) + 0.5 * KL(q || m),  m = 0.5*(p+q).
+    JSD is a proper symmetric metric (square root is a distance).
+    """
+    m = 0.5 * (p + q)
+    kl_pm = kl_divergence(p, m, eps=eps)
+    kl_qm = kl_divergence(q, m, eps=eps)
+    jsd = 0.5 * kl_pm + 0.5 * kl_qm
+    return float(jsd.mean().item())

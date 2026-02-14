@@ -109,10 +109,27 @@ def generate_task_pair(
     rng.shuffle(vals_a)
     rng.shuffle(vals_b)
 
-    for idx in range(shared_n):
-        if vals_a[idx] == vals_b[idx]:
-            swap_idx = (idx + 1) % n_keys
-            vals_b[idx], vals_b[swap_idx] = vals_b[swap_idx], vals_b[idx]
+    # Resolve all shared-key conflicts: guarantee vals_a[i] != vals_b[i] for i < shared_n.
+    max_iters = shared_n * n_keys  # safety bound
+    changed = True
+    iters = 0
+    while changed and iters < max_iters:
+        changed = False
+        for idx in range(shared_n):
+            if vals_a[idx] == vals_b[idx]:
+                # Find a non-shared position to swap with that doesn't create a new conflict.
+                swapped = False
+                for candidate in range(shared_n, n_keys):
+                    if vals_b[candidate] != vals_a[idx]:
+                        vals_b[idx], vals_b[candidate] = vals_b[candidate], vals_b[idx]
+                        swapped = True
+                        break
+                if not swapped:
+                    # Fallback: swap with next position (original behaviour).
+                    swap_idx = (idx + 1) % n_keys
+                    vals_b[idx], vals_b[swap_idx] = vals_b[swap_idx], vals_b[idx]
+                    changed = True
+                iters += 1
 
     task_a = _build_task(
         task_id="A",

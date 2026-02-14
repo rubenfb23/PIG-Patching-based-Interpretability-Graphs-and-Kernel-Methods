@@ -2,12 +2,35 @@
 
 from __future__ import annotations
 
+import torch
 import numpy as np
+from transformers import PreTrainedModel
 
 
 def compute_forgetting(acc_a_ma: float, acc_a_mab: float) -> float:
     """Forgetting on task A after learning B."""
     return float(acc_a_ma - acc_a_mab)
+
+
+@torch.no_grad()
+def compute_weight_distance(
+    model_a: PreTrainedModel,
+    model_b: PreTrainedModel,
+) -> dict[str, float]:
+    """L2 and cosine distance between two model parameter states."""
+    flat_a: list[torch.Tensor] = []
+    flat_b: list[torch.Tensor] = []
+    for (_, pa), (_, pb) in zip(
+        model_a.named_parameters(), model_b.named_parameters(), strict=True
+    ):
+        flat_a.append(pa.detach().reshape(-1).float())
+        flat_b.append(pb.detach().reshape(-1).float())
+    va = torch.cat(flat_a)
+    vb = torch.cat(flat_b)
+    l2 = float(torch.norm(va - vb).item())
+    denom = torch.norm(va) * torch.norm(vb)
+    cosine = float(torch.dot(va, vb) / torch.clamp(denom, min=1e-12))
+    return {"l2_distance": l2, "cosine_similarity": cosine}
 
 
 def compute_hysteresis_metrics(

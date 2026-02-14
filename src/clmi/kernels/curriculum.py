@@ -29,7 +29,7 @@ def greedy_curriculum(
         for idx in remaining:
             score = float(np.mean([kernel_matrix[idx, j] for j in order]))
             if objective == "min_conflict":
-                candidate = score
+                candidate = -score
             elif objective == "max_similarity":
                 candidate = score
             else:

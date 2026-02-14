@@ -7,12 +7,7 @@ import torch
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 from clmi.model.hooks import run_with_projection_intervention
-
-
-def _kl_divergence(p: torch.Tensor, q: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    p_safe = torch.clamp(p, min=eps)
-    q_safe = torch.clamp(q, min=eps)
-    return torch.sum(p_safe * (torch.log(p_safe) - torch.log(q_safe)), dim=-1)
+from clmi.utils.torch_helpers import kl_divergence
 
 
 @torch.no_grad()
@@ -53,7 +48,7 @@ def compute_functional_kl_ab_ba(
         device=device,
     )
 
-    return float(_kl_divergence(probs_ab, probs_ba).mean().item())
+    return float(kl_divergence(probs_ab, probs_ba).mean().item())
 
 
 @torch.no_grad()
@@ -81,6 +76,9 @@ def compute_intervention_effect_embedding(
     batch_idx = torch.arange(base_logits.shape[0], device=device)
     base_next = base_logits[batch_idx, last_idx, :]
 
+    # Compute baseline log-probs from logits for a consistent comparison.
+    base_logprobs = torch.log_softmax(base_next, dim=-1)
+
     torch_proj = {layer: torch.from_numpy(p) for layer, p in projectors.items()}
     probs_intervened = run_with_projection_intervention(
         model,
@@ -94,13 +92,13 @@ def compute_intervention_effect_embedding(
         device=device,
     )
 
-    inter_next = torch.log(torch.clamp(probs_intervened, min=1e-8))
+    inter_logprobs = torch.log(torch.clamp(probs_intervened, min=1e-8))
 
     pos = torch.tensor(positive_token_ids, device=device)
     neg = torch.tensor(negative_token_ids, device=device)
 
-    base_ld = base_next[batch_idx, pos] - base_next[batch_idx, neg]
-    inter_ld = inter_next[batch_idx, pos] - inter_next[batch_idx, neg]
+    base_ld = base_logprobs[batch_idx, pos] - base_logprobs[batch_idx, neg]
+    inter_ld = inter_logprobs[batch_idx, pos] - inter_logprobs[batch_idx, neg]
     delta = inter_ld - base_ld
 
     return delta.detach().cpu().numpy().astype(np.float32)

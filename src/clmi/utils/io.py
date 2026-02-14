@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,7 @@ from typing import Any
 import pandas as pd
 
 
-RESULTS_ROOT = Path("results")
+RESULTS_ROOT = Path(os.environ.get("CLMI_RESULTS_ROOT", "results"))
 
 
 def ensure_dir(path: Path) -> Path:

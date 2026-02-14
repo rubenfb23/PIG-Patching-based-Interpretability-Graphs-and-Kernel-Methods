@@ -33,8 +33,15 @@ from clmi.causal.subspaces import (
 )
 from clmi.data.synth_tasks import TaskPair, generate_task_pair
 from clmi.kernels.kernels import k_func, k_nc, k_proj
-from clmi.metrics.forgetting import compute_forgetting, compute_hysteresis_metrics
-from clmi.metrics.noncommutativity import compute_operator_noncommutativity
+from clmi.metrics.forgetting import (
+    compute_forgetting,
+    compute_hysteresis_metrics,
+    compute_weight_distance,
+)
+from clmi.metrics.noncommutativity import (
+    compute_jensen_shannon,
+    compute_operator_noncommutativity,
+)
 from clmi.metrics.robustness import evaluate_robustness
 from clmi.model.finetune import (
     compute_anchor_targets,
@@ -94,6 +101,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-every", type=int, default=10)
     parser.add_argument("--robustness-samples", type=int, default=64)
     parser.add_argument("--run-id", default=None)
+    parser.add_argument(
+        "--protocol",
+        choices=["ABA", "BAB"],
+        default="ABA",
+        help="Task-ordering protocol: ABA (default) or BAB (reversed).",
+    )
     parser.add_argument("--append-summary", action="store_true")
     parser.add_argument("--summary-path", default=None)
     parser.add_argument("--smoke", action="store_true")
@@ -104,9 +117,10 @@ def _make_run_id(args: argparse.Namespace) -> str:
     if args.run_id:
         return args.run_id
     overlap_tag = str(args.overlap).replace(".", "p")
+    proto_tag = f"_{args.protocol}" if args.protocol != "ABA" else ""
     return (
         f"pair_o{overlap_tag}_s{args.seed}_p{args.pair_id}_"
-        f"{args.ft_mode}_{args.mitigation}"
+        f"{args.ft_mode}_{args.mitigation}{proto_tag}"
     )
 
 
@@ -261,13 +275,21 @@ def main() -> None:
         max_answer_tokens=2,
     )
 
+    # For BAB protocol, swap tasks so that task_a=B, task_b=A
+    # (the rest of the pipeline stays identical — labels in metrics will
+    # reflect 'A' = 'first task trained', not the original identity).
+    if args.protocol == "BAB":
+        pair = TaskPair(
+            task_a=pair.task_b,
+            task_b=pair.task_a,
+            shared_keys=pair.shared_keys,
+        )
+
     layers = tuple(range(model.config.n_layer))
 
     exp_cfg = ExperimentConfig(
         run_id=run_id,
         pair_id=args.pair_id,
-        overlap=args.overlap,
-        seed=args.seed,
         data=DataConfig(
             n_keys=args.n_keys,
             n_values=args.n_values,
@@ -395,7 +417,7 @@ def main() -> None:
             device=device,
         )
 
-    # Phase B
+    # Phase B (monitor task-A degradation via secondary_eval_task)
     result_b = finetune_on_task(
         model=model,
         tokenizer=tokenizer,
@@ -409,6 +431,7 @@ def main() -> None:
         anchor_targets=anchor_targets,
         anchor_weight=args.anchor_weight if anchor_targets else 0.0,
         eval_task=pair.task_b,
+        secondary_eval_task=pair.task_a,
     )
     model = result_b.model
     save_checkpoint(model, tokenizer, ckp_dir, "MAB")
@@ -513,6 +536,13 @@ def main() -> None:
     )
     k_func_value = k_func(phi_a, phi_b, kind="linear", gamma=args.gamma)
 
+    # Save phi embeddings for offline kernel analysis
+    np.savez_compressed(
+        run_path / "phi_embeddings.npz",
+        phi_a=phi_a,
+        phi_b=phi_b,
+    )
+
     random_proj_a = sample_random_projectors(
         list(layers),
         d_model=model.config.n_embd,
@@ -546,7 +576,7 @@ def main() -> None:
         seed=args.seed + 1,
     )
 
-    # Phase A2 for hysteresis
+    # Phase A2 for hysteresis (monitor task-B via secondary_eval_task)
     result_a2 = finetune_on_task(
         model=model,
         tokenizer=tokenizer,
@@ -557,9 +587,29 @@ def main() -> None:
         epochs=1,
         max_steps=args.max_steps_a2,
         eval_task=pair.task_a,
+        secondary_eval_task=pair.task_b,
     )
     model = result_a2.model
     save_checkpoint(model, tokenizer, ckp_dir, "MABA")
+
+    # Final accuracies after A2
+    acc_a_maba = evaluate_task_accuracy(
+        model, tokenizer, pair.task_a, device=device, top_k=5,
+    )["acc_exact"]
+    acc_b_maba = evaluate_task_accuracy(
+        model, tokenizer, pair.task_b, device=device, top_k=5,
+    )["acc_exact"]
+
+    # Weight-space distances between phases (load checkpoints)
+    from clmi.model.gpt2_loader import load_model_tokenizer as _reload
+    _m0, _, _ = _reload(model_name=str(ckp_dir / "M0"), device=device, local_files_only=True)
+    _ma, _, _ = _reload(model_name=str(ckp_dir / "MA"), device=device, local_files_only=True)
+    _mab, _, _ = _reload(model_name=str(ckp_dir / "MAB"), device=device, local_files_only=True)
+    wdist_m0_ma = compute_weight_distance(_m0, _ma)
+    wdist_ma_mab = compute_weight_distance(_ma, _mab)
+    wdist_mab_maba = compute_weight_distance(model, _mab)    # MABA vs MAB
+    wdist_m0_maba = compute_weight_distance(_m0, model)      # MABA vs M0 (cycle closure)
+    del _m0, _ma, _mab  # free memory
 
     eval_curve = (
         result_a2.history["eval_acc_exact"].dropna().astype(float).tolist()
@@ -569,32 +619,81 @@ def main() -> None:
     hysteresis_curve = [acc_a_mab] + eval_curve
     hyst = compute_hysteresis_metrics(hysteresis_curve, acc_ref=acc_a_ma, threshold_ratio=0.95)
 
+    # Build full-loop Acc_A trajectory across all 3 phases for visualization.
+    full_acca_curve: list[float] = []
+    # Phase A: Acc_A rising
+    if "eval_acc_exact" in result_a.history.columns:
+        full_acca_curve += result_a.history["eval_acc_exact"].dropna().astype(float).tolist()
+    else:
+        full_acca_curve.append(acc_a_ma)
+    # Phase B: Acc_A declining (from secondary eval)
+    if "secondary_acc_exact" in result_b.history.columns:
+        full_acca_curve += result_b.history["secondary_acc_exact"].dropna().astype(float).tolist()
+    else:
+        full_acca_curve.append(acc_a_mab)
+    # Phase A2: Acc_A recovering
+    full_acca_curve += eval_curve if eval_curve else [acc_a_maba]
+
+    # Symmetric: also track Acc_B across all 3 phases
+    full_accb_curve: list[float] = []
+    if "secondary_acc_exact" in result_a.history.columns:
+        full_accb_curve += result_a.history["secondary_acc_exact"].dropna().astype(float).tolist()
+    if "eval_acc_exact" in result_b.history.columns:
+        full_accb_curve += result_b.history["eval_acc_exact"].dropna().astype(float).tolist()
+    else:
+        full_accb_curve.append(acc_b_mab)
+    if "secondary_acc_exact" in result_a2.history.columns:
+        full_accb_curve += result_a2.history["secondary_acc_exact"].dropna().astype(float).tolist()
+    else:
+        full_accb_curve.append(acc_b_maba)
+
     pair_metrics = {
         "run_id": run_id,
         "seed": args.seed,
         "pair_id": args.pair_id,
         "overlap": args.overlap,
+        "protocol": args.protocol,
         "model": args.model,
         "ft_mode": args.ft_mode,
         "mitigation": args.mitigation,
+        # Accuracy at each phase checkpoint
         "AccA_MA": acc_a_ma,
         "AccA_MAB": acc_a_mab,
         "AccB_MAB": acc_b_mab,
+        "AccA_MABA": acc_a_maba,
+        "AccB_MABA": acc_b_maba,
+        # Forgetting
         "forgettingA": forgetting_a,
+        "forgettingB_after_A2": compute_forgetting(acc_b_mab, acc_b_maba),
+        # Hysteresis metrics
         "remanenceA": hyst["remanence"],
         "coercivity_steps": hyst["coercivity_steps"],
         "hysteresis_area": hyst["hysteresis_area"],
+        # Subspace metrics
         "NC_global": nc["nc_global"],
         "mean_NC_layers": nc["mean_nc_layers"],
         "KL_AB_BA": kl_ab_ba,
+        # Kernel values
         "k_proj": k_proj_value,
         "k_NC": k_nc_value,
         "k_func": k_func_value,
+        # Baselines
         "grad_overlap": grad_overlap,
         "prompt_embed_sim": prompt_embed_sim,
+        # Random controls
         "random_nc_control": random_nc["nc_global"],
         "random_k_proj_control": random_k_proj,
         "random_k_nc_control": random_k_nc,
+        # Weight-space distances
+        "wdist_M0_MA_l2": wdist_m0_ma["l2_distance"],
+        "wdist_M0_MA_cos": wdist_m0_ma["cosine_similarity"],
+        "wdist_MA_MAB_l2": wdist_ma_mab["l2_distance"],
+        "wdist_MA_MAB_cos": wdist_ma_mab["cosine_similarity"],
+        "wdist_MAB_MABA_l2": wdist_mab_maba["l2_distance"],
+        "wdist_MAB_MABA_cos": wdist_mab_maba["cosine_similarity"],
+        "wdist_M0_MABA_l2": wdist_m0_maba["l2_distance"],
+        "wdist_M0_MABA_cos": wdist_m0_maba["cosine_similarity"],
+        # Cache info
         "cache_hit_A": int(cache_hit_a),
         "cache_hit_B": int(cache_hit_b),
         "protected_layers": ",".join(str(x) for x in protected_layers),
@@ -624,6 +723,16 @@ def main() -> None:
         }
     )
     save_csv(run_path / "hysteresis_curve.csv", curve_df)
+
+    # Full-loop trajectory: Acc_A and Acc_B across all 3 phases
+    full_loop_df = pd.DataFrame(
+        {
+            "step": list(range(max(len(full_acca_curve), len(full_accb_curve)))),
+            "acc_a": full_acca_curve + [np.nan] * max(0, len(full_accb_curve) - len(full_acca_curve)),
+            "acc_b": full_accb_curve + [np.nan] * max(0, len(full_acca_curve) - len(full_accb_curve)),
+        }
+    )
+    save_csv(run_path / "full_loop_curve.csv", full_loop_df)
 
     hist_df = pd.concat([result_a.history, result_b.history, result_a2.history], ignore_index=True)
     save_csv(run_path / "train_history.csv", hist_df)

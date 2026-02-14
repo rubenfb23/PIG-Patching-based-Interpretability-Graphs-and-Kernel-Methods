@@ -8,19 +8,15 @@ from typing import Literal
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
+from clmi.utils.torch_helpers import model_dtype, unwrap_model
+
 
 InterventionOrder = Literal["AB", "BA"]
 InterventionMode = Literal["reinforce", "suppress"]
 
 
-def _unwrap_model(model: PreTrainedModel) -> PreTrainedModel:
-    if hasattr(model, "base_model") and hasattr(model.base_model, "model"):
-        return model.base_model.model
-    return model
-
-
 def _get_blocks(model: PreTrainedModel):
-    return _unwrap_model(model).transformer.h
+    return unwrap_model(model).transformer.h
 
 
 @torch.no_grad()
@@ -58,7 +54,8 @@ def _apply_projection(
     beta: float,
     mode: InterventionMode,
 ) -> torch.Tensor:
-    projected = hidden @ projector.T
+    # Projectors are symmetric (P = U @ U.T), so P.T == P; use P directly.
+    projected = hidden @ projector
     if mode == "reinforce":
         return hidden + beta * projected
     return hidden - beta * projected
@@ -84,18 +81,19 @@ def run_with_projection_intervention(
         order: "AB" applies A then B, "BA" applies B then A.
     """
     model.eval()
-    base = _unwrap_model(model)
+    base = unwrap_model(model)
     blocks = _get_blocks(model)
+    dtype = model_dtype(model)
 
     tensor_a = {
-        l: p.to(device=device, dtype=base.dtype if hasattr(base, "dtype") else torch.float32)
+        l: p.to(device=device, dtype=dtype)
         for l, p in projectors_a.items()
     }
     tensor_b = (
         {
             l: p.to(
                 device=device,
-                dtype=base.dtype if hasattr(base, "dtype") else torch.float32,
+                dtype=dtype,
             )
             for l, p in projectors_b.items()
         }

@@ -18,6 +18,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizerBase
 from clmi.data.synth_tasks import TaskMapping, XYExample
 from clmi.utils.config import TrainConfig
 from clmi.utils.io import ensure_dir
+from clmi.utils.torch_helpers import unwrap_model
 
 try:
     from peft import LoraConfig, PeftModel, TaskType, get_peft_model
@@ -37,16 +38,16 @@ class FinetuneResult:
     total_steps: int
 
 
-def _base_model(model: PreTrainedModel) -> PreTrainedModel:
-    if hasattr(model, "base_model") and hasattr(model.base_model, "model"):
-        return model.base_model.model
-    return model
-
-
 def _prepare_model_for_mode(
     model: PreTrainedModel,
     train_cfg: TrainConfig,
 ) -> PreTrainedModel:
+    """Prepare model for the requested fine-tuning mode.
+
+    For LoRA: if the model is already a PeftModel (e.g. from a previous phase),
+    we reuse the existing adapter so that continual-learning happens over the
+    same parameter set — this is intentional for the A→B→A2 protocol.
+    """
     if train_cfg.ft_mode == "lora":
         if get_peft_model is None or LoraConfig is None or TaskType is None:
             raise RuntimeError("peft is required for LoRA mode. Install `peft`.")
@@ -69,9 +70,20 @@ def _prepare_model_for_mode(
     return model
 
 
+def unfreeze_transformer_layers(model: PreTrainedModel, layers: Iterable[int]) -> None:
+    """Unfreeze selected transformer blocks by index."""
+    base = unwrap_model(model)
+    blocks = getattr(base, "transformer").h
+    for layer in layers:
+        if layer < 0 or layer >= len(blocks):
+            continue
+        for param in blocks[layer].parameters():
+            param.requires_grad = True
+
+
 def freeze_transformer_layers(model: PreTrainedModel, layers: Iterable[int]) -> None:
     """Freeze selected transformer blocks by index."""
-    base = _base_model(model)
+    base = unwrap_model(model)
     blocks = getattr(base, "transformer").h
     for layer in layers:
         if layer < 0 or layer >= len(blocks):
@@ -162,43 +174,66 @@ def evaluate_task_accuracy(
     device: str,
     top_k: int = 1,
     max_examples: int | None = None,
+    batch_size: int = 32,
 ) -> dict[str, float]:
-    """Evaluate token and exact-sequence next-token accuracy on a task."""
+    """Evaluate token and exact-sequence next-token accuracy on a task.
+
+    Uses batched inference for efficiency.
+    """
     model.eval()
     n = len(task.examples) if max_examples is None else min(max_examples, len(task.examples))
+    examples = list(task.examples[:n])
 
     exact_hits = 0
     token_hits = 0
     topk_hits = 0
     total_tokens = 0
 
-    for example in task.examples[:n]:
-        prompt_ids = tokenizer(example.prompt, add_special_tokens=False)["input_ids"]
-        answer_ids = list(example.answer_token_ids)
-        full_ids = prompt_ids + answer_ids
-        input_ids = torch.tensor(full_ids, dtype=torch.long, device=device).unsqueeze(0)
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
-        logits = model(input_ids=input_ids).logits[0]
-        all_correct = True
+    for start in range(0, n, batch_size):
+        batch = examples[start : start + batch_size]
 
-        for j, target_id in enumerate(answer_ids):
-            pos = len(prompt_ids) + j - 1
-            pred_scores = logits[pos]
-            pred_top1 = int(torch.argmax(pred_scores).item())
-            pred_topk = torch.topk(pred_scores, k=max(1, top_k)).indices.tolist()
+        # Pre-tokenize each example to track prompt/answer boundaries.
+        all_ids: list[list[int]] = []
+        prompt_lens: list[int] = []
+        answer_id_lists: list[list[int]] = []
+        for ex in batch:
+            prompt_ids = tokenizer(ex.prompt, add_special_tokens=False)["input_ids"]
+            answer_ids = list(ex.answer_token_ids)
+            all_ids.append(prompt_ids + answer_ids)
+            prompt_lens.append(len(prompt_ids))
+            answer_id_lists.append(answer_ids)
 
-            if pred_top1 == target_id:
-                token_hits += 1
-            else:
-                all_correct = False
+        max_len = max(len(ids) for ids in all_ids)
+        input_tensor = torch.full(
+            (len(batch), max_len), pad_id, dtype=torch.long, device=device
+        )
+        for i, ids in enumerate(all_ids):
+            input_tensor[i, : len(ids)] = torch.tensor(ids, dtype=torch.long)
 
-            if target_id in pred_topk:
-                topk_hits += 1
+        logits = model(input_ids=input_tensor).logits  # [B, T, V]
 
-            total_tokens += 1
+        for i, answer_ids in enumerate(answer_id_lists):
+            all_correct = True
+            for j, target_id in enumerate(answer_ids):
+                pos = prompt_lens[i] + j - 1
+                pred_scores = logits[i, pos]
+                pred_top1 = int(torch.argmax(pred_scores).item())
+                pred_topk = torch.topk(pred_scores, k=max(1, top_k)).indices.tolist()
 
-        if all_correct:
-            exact_hits += 1
+                if pred_top1 == target_id:
+                    token_hits += 1
+                else:
+                    all_correct = False
+
+                if target_id in pred_topk:
+                    topk_hits += 1
+
+                total_tokens += 1
+
+            if all_correct:
+                exact_hits += 1
 
     return {
         "acc_exact": exact_hits / max(1, n),
@@ -274,9 +309,21 @@ def finetune_on_task(
     anchor_targets: dict[int, torch.Tensor] | None = None,
     anchor_weight: float = 0.0,
     eval_task: TaskMapping | None = None,
+    secondary_eval_task: TaskMapping | None = None,
 ) -> FinetuneResult:
-    """Fine-tune model on one task phase and return step history."""
+    """Fine-tune model on one task phase and return step history.
+
+    Args:
+        eval_task: Primary task evaluated every ``eval_every`` steps.
+        secondary_eval_task: Optional second task evaluated on the same schedule
+            (e.g. task-A during phase-B to track degradation).
+    """
     model = _prepare_model_for_mode(model, train_cfg)
+
+    # Ensure all transformer layers start unfrozen; then selectively freeze if requested.
+    base = unwrap_model(model)
+    n_layers = len(getattr(base, "transformer").h)
+    unfreeze_transformer_layers(model, range(n_layers))
 
     if freeze_layers:
         freeze_transformer_layers(model, freeze_layers)
@@ -363,6 +410,22 @@ def finetune_on_task(
                     {
                         "eval_acc_exact": eval_metrics["acc_exact"],
                         "eval_acc_token": eval_metrics["acc_token"],
+                    }
+                )
+
+            if secondary_eval_task is not None and (step % train_cfg.eval_every == 0 or step == steps_target):
+                sec_metrics = evaluate_task_accuracy(
+                    model,
+                    tokenizer,
+                    secondary_eval_task,
+                    device=device,
+                    top_k=5,
+                    max_examples=128,
+                )
+                row.update(
+                    {
+                        "secondary_acc_exact": sec_metrics["acc_exact"],
+                        "secondary_acc_token": sec_metrics["acc_token"],
                     }
                 )
 

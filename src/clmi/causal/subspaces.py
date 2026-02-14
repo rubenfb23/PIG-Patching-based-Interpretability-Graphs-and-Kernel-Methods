@@ -34,13 +34,14 @@ def fit_layer_subspace(
     ridge_alpha: float,
     bootstrap_iters: int,
     seed: int,
+    layer_idx: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Fit one layer subspace using bootstrap ridge vectors + QR."""
     n, d_model = h_matrix.shape
     if n < 2:
         raise ValueError("Need at least two samples to fit subspace.")
 
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(seed + layer_idx)
     iters = max(bootstrap_iters, k)
     vectors: list[np.ndarray] = []
 
@@ -74,13 +75,15 @@ def collect_layer_activations(
     layers: list[int],
     device: str,
     negative_token_ids: list[int] | None = None,
+    batch_size: int = 32,
 ) -> tuple[dict[int, np.ndarray], np.ndarray]:
     """Collect h_{l,i} and y_i=logit_diff for a task.
 
     h_{l,i} is taken at the final prompt position (before first answer token).
+    Uses batched inference for efficiency.
     """
     model.eval()
-    activations = {layer: [] for layer in layers}
+    activations: dict[int, list[np.ndarray]] = {layer: [] for layer in layers}
     y_values: list[float] = []
 
     first_answer_ids = [int(ex.answer_token_ids[0]) for ex in task.examples]
@@ -91,27 +94,52 @@ def collect_layer_activations(
             for pos, neg in zip(first_answer_ids, rotated, strict=True)
         ]
 
-    for example, pos_tok, neg_tok in zip(
-        task.examples,
-        first_answer_ids,
-        negative_token_ids,
-        strict=True,
-    ):
-        prompt_ids = tokenizer(example.prompt, add_special_tokens=False)["input_ids"]
-        answer_ids = list(example.answer_token_ids)
-        full_ids = prompt_ids + answer_ids
+    examples = list(task.examples)
+    n = len(examples)
 
-        input_ids = torch.tensor(full_ids, dtype=torch.long, device=device).unsqueeze(0)
-        outputs = model(input_ids=input_ids, output_hidden_states=True, use_cache=False)
-        logits = outputs.logits[0]
-        pos = len(prompt_ids) - 1
+    for start in range(0, n, batch_size):
+        end = min(start + batch_size, n)
+        batch_examples = examples[start:end]
+        batch_pos_toks = first_answer_ids[start:end]
+        batch_neg_toks = negative_token_ids[start:end]
 
-        y = float(logits[pos, pos_tok].item() - logits[pos, neg_tok].item())
-        y_values.append(y)
+        # Build padded batch of full sequences (prompt + answer)
+        pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+        all_ids: list[list[int]] = []
+        prompt_lengths: list[int] = []
+        for ex in batch_examples:
+            prompt_ids = tokenizer(ex.prompt, add_special_tokens=False)["input_ids"]
+            answer_ids = list(ex.answer_token_ids)
+            all_ids.append(prompt_ids + answer_ids)
+            prompt_lengths.append(len(prompt_ids))
 
-        for layer in layers:
-            hidden = outputs.hidden_states[layer + 1][0, pos, :].detach().cpu().numpy()
-            activations[layer].append(hidden)
+        max_len = max(len(ids) for ids in all_ids)
+        input_tensor = torch.full(
+            (len(all_ids), max_len), pad_id, dtype=torch.long, device=device
+        )
+        for i, ids in enumerate(all_ids):
+            input_tensor[i, : len(ids)] = torch.tensor(ids, dtype=torch.long)
+
+        attention_mask = (input_tensor != pad_id).long()
+        outputs = model(
+            input_ids=input_tensor,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            use_cache=False,
+        )
+
+        logits = outputs.logits  # [B, T, V]
+        for i in range(len(batch_examples)):
+            pos = prompt_lengths[i] - 1
+            y = float(
+                logits[i, pos, batch_pos_toks[i]].item()
+                - logits[i, pos, batch_neg_toks[i]].item()
+            )
+            y_values.append(y)
+
+            for layer in layers:
+                hidden = outputs.hidden_states[layer + 1][i, pos, :].detach().cpu().numpy()
+                activations[layer].append(hidden)
 
     stacked = {layer: np.stack(values, axis=0) for layer, values in activations.items()}
     return stacked, np.asarray(y_values, dtype=np.float32)
@@ -244,6 +272,7 @@ def build_task_projectors(
     bases: dict[int, np.ndarray] = {}
     projectors: dict[int, np.ndarray] = {}
 
+    base_seed = hash((model_name, state_tag, task.task_id)) & 0xFFFFFFFF
     for i, layer in enumerate(layers):
         U, P = fit_layer_subspace(
             activations[layer],
@@ -251,7 +280,8 @@ def build_task_projectors(
             k=cfg.k,
             ridge_alpha=cfg.ridge_alpha,
             bootstrap_iters=cfg.bootstrap_iters,
-            seed=cfg.k + i,
+            seed=base_seed,
+            layer_idx=i,
         )
         bases[layer] = U
         projectors[layer] = P

@@ -90,18 +90,28 @@ class MitigationConfig:
 
 @dataclass(frozen=True)
 class ExperimentConfig:
-    """Top-level config for a pair run."""
+    """Top-level config for a pair run.
+
+    ``overlap`` and ``seed`` are convenience properties that delegate to
+    ``data.overlap`` and ``train.seed`` respectively.
+    """
 
     run_id: str
     pair_id: int
-    overlap: float
-    seed: int
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     subspace: SubspaceConfig = field(default_factory=SubspaceConfig)
     intervention: InterventionConfig = field(default_factory=InterventionConfig)
     robustness: RobustnessConfig = field(default_factory=RobustnessConfig)
     mitigation: MitigationConfig = field(default_factory=MitigationConfig)
+
+    @property
+    def overlap(self) -> float:
+        return self.data.overlap
+
+    @property
+    def seed(self) -> int:
+        return self.train.seed
 
 
 DEFAULT_OVERLAPS: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75)

@@ -47,23 +47,10 @@ def load_model_tokenizer(
         "torch_dtype": torch_dtype,
         "local_files_only": local_files_only,
     }
-    try:
-        # Prefer legacy .bin weights first (works for tiny/local checkpoints).
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            use_safetensors=False,
-            **load_kwargs,
-        )
-    except OSError as exc:
-        # Fallback for models distributed only as safetensors (e.g. current gpt2 hub files).
-        msg = str(exc)
-        if "pytorch_model.bin" in msg or "model.safetensors" in msg:
-            model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                use_safetensors=True,
-                **load_kwargs,
-            )
-        else:
-            raise
+    # Let transformers auto-detect the weight format (.bin or .safetensors).
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        **load_kwargs,
+    )
     model.to(resolved_device)
     return model, tokenizer, resolved_device
