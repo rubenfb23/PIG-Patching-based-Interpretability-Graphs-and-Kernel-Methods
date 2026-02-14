@@ -67,10 +67,21 @@ def save_csv(path: Path, frame: pd.DataFrame) -> None:
 
 
 def append_csv(path: Path, frame: pd.DataFrame) -> None:
-    """Append a dataframe to csv creating header on first write."""
+    """Append a dataframe to csv creating header on first write.
+
+    Uses a lock file to allow safe concurrent appends from multiple processes.
+    """
+    import fcntl
+
     ensure_dir(path.parent)
-    exists = path.exists()
-    frame.to_csv(path, mode="a", header=not exists, index=False)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with open(lock_path, "w") as lock_fh:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        try:
+            exists = path.exists()
+            frame.to_csv(path, mode="a", header=not exists, index=False)
+        finally:
+            fcntl.flock(lock_fh, fcntl.LOCK_UN)
 
 
 def stable_hash(parts: list[str]) -> str:

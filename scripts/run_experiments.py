@@ -7,6 +7,8 @@ import argparse
 import os
 import subprocess
 import sys
+import threading
+from concurrent.futures import as_completed
 from pathlib import Path
 
 import numpy as np
@@ -74,6 +76,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Resume from existing results/tables/summary.csv and skip completed run_ids.",
     )
+    parser.add_argument(
+        "--n-gpus",
+        type=int,
+        default=1,
+        help="Number of GPUs available. Runs are distributed round-robin "
+             "across CUDA devices 0..n-1 in parallel.",
+    )
     return parser.parse_args()
 
 
@@ -100,7 +109,7 @@ def _build_run_pair_cmd(args: argparse.Namespace, overlap: float, seed: int, pai
         "--model",
         args.model,
         "--device",
-        args.device,
+        "cuda",  # GPU id is set via CUDA_VISIBLE_DEVICES
         "--seed",
         str(seed),
         "--pair-id",
@@ -146,6 +155,31 @@ def _build_run_pair_cmd(args: argparse.Namespace, overlap: float, seed: int, pai
     if args.smoke:
         cmd.append("--smoke")
     return cmd
+
+
+# --- Multi-GPU parallel dispatch helpers ---
+
+_summary_lock = threading.Lock()
+
+
+def _run_one(cmd: list[str], gpu_id: int, run_idx: int, total: int, run_id: str, local_files_only: bool) -> tuple[str, int]:
+    """Execute a single run_pair.py command on a specific GPU.
+
+    Returns (run_id, returncode).
+    """
+    child_env = os.environ.copy()
+    child_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    if local_files_only:
+        child_env.setdefault("HF_HUB_OFFLINE", "1")
+        child_env.setdefault("TRANSFORMERS_OFFLINE", "1")
+        child_env.setdefault("DISABLE_SAFETENSORS_CONVERSION", "1")
+    print(f"[{run_idx}/{total}] GPU {gpu_id} | {run_id}")
+    proc = subprocess.run(cmd, check=False, env=child_env)
+    if proc.returncode == 0:
+        print(f"[run_pair] completed run_id={run_id}")
+    else:
+        print(f"[run_pair] FAILED run_id={run_id} (exit {proc.returncode})")
+    return run_id, proc.returncode
 
 
 def _load_projectors_from_run(run_id: str, task_label: str) -> dict[int, np.ndarray] | None:
@@ -245,6 +279,8 @@ def main() -> None:
     )
 
     run_idx = 0
+    # Build the full list of pending jobs first
+    pending_jobs: list[tuple[int, str, list[str]]] = []
     for protocol in args.protocols:
         for ft_mode in args.ft_modes:
             for mitigation in args.mitigations:
@@ -266,21 +302,52 @@ def main() -> None:
                                 summary_path=summary_path,
                                 protocol=protocol,
                             )
-                            print(f"[{run_idx}/{total_runs}] {' '.join(cmd)}")
-                            child_env = os.environ.copy()
-                            if args.local_files_only:
-                                child_env.setdefault("HF_HUB_OFFLINE", "1")
-                                child_env.setdefault("TRANSFORMERS_OFFLINE", "1")
-                                child_env.setdefault(
-                                    "DISABLE_SAFETENSORS_CONVERSION", "1"
-                                )
-                            proc = subprocess.run(cmd, check=False, env=child_env)
-                            if proc.returncode != 0:
-                                failures.append((" ".join(cmd), proc.returncode))
-                                if not args.continue_on_error:
-                                    raise SystemExit(proc.returncode)
-                            else:
-                                completed_run_ids.add(run_id)
+                            pending_jobs.append((run_idx, run_id, cmd))
+
+    n_gpus = max(1, args.n_gpus)
+    print(f"\n=== {len(pending_jobs)} runs pending, dispatching across {n_gpus} GPU(s) ===\n")
+
+    if n_gpus == 1:
+        # Sequential (original behavior)
+        for job_idx, run_id, cmd in pending_jobs:
+            child_env = os.environ.copy()
+            if args.local_files_only:
+                child_env.setdefault("HF_HUB_OFFLINE", "1")
+                child_env.setdefault("TRANSFORMERS_OFFLINE", "1")
+                child_env.setdefault("DISABLE_SAFETENSORS_CONVERSION", "1")
+            print(f"[{job_idx}/{total_runs}] {' '.join(cmd)}")
+            proc = subprocess.run(cmd, check=False, env=child_env)
+            if proc.returncode != 0:
+                failures.append((" ".join(cmd), proc.returncode))
+                if not args.continue_on_error:
+                    raise SystemExit(proc.returncode)
+            else:
+                completed_run_ids.add(run_id)
+    else:
+        # Parallel: dispatch across GPUs with a thread pool
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=n_gpus) as pool:
+            futures = {}
+            for i, (job_idx, run_id, cmd) in enumerate(pending_jobs):
+                gpu_id = i % n_gpus
+                fut = pool.submit(
+                    _run_one, cmd, gpu_id, job_idx, total_runs,
+                    run_id, args.local_files_only,
+                )
+                futures[fut] = (run_id, cmd)
+
+            for fut in as_completed(futures):
+                run_id, cmd = futures[fut]
+                rid, rc = fut.result()
+                if rc != 0:
+                    failures.append((" ".join(cmd), rc))
+                    if not args.continue_on_error:
+                        # Cancel remaining
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        raise SystemExit(rc)
+                else:
+                    completed_run_ids.add(rid)
 
     if not summary_path.exists():
         raise SystemExit("No summary produced. All runs failed?")
