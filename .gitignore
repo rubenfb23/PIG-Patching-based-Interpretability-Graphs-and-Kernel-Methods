@@ -205,6 +205,10 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+# Weights & Biases local run artifacts
+wandb/
+*.wandb
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
