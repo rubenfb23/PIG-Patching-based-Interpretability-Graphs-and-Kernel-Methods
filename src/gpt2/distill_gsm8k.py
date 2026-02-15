@@ -17,6 +17,7 @@ import argparse
 import json
 import math
 import re
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -153,6 +154,43 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Show tqdm progress bar during distillation.",
     )
+    parser.add_argument(
+        "--wandb-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable Weights & Biases metric logging.",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        default="pig-distill",
+        help="W&B project name.",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        default="",
+        help="W&B entity/team (optional).",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        default="",
+        help="W&B run name (optional).",
+    )
+    parser.add_argument(
+        "--wandb-group",
+        default="",
+        help="W&B group name (optional).",
+    )
+    parser.add_argument(
+        "--wandb-tags",
+        default="distill,gsm8k",
+        help="Comma-separated W&B tags.",
+    )
+    parser.add_argument(
+        "--wandb-mode",
+        choices=("online", "offline"),
+        default="online",
+        help="W&B mode. Use offline to avoid immediate upload.",
+    )
     return parser.parse_args()
 
 
@@ -172,15 +210,15 @@ def choose_dtype(dtype_arg: str) -> torch.dtype:
 def build_prompt(question: str) -> str:
     """Build strict teacher prompt with parseable tags."""
     return (
-        "Resuelve este problema de matematicas.\n"
-        "Devuelve SIEMPRE este formato exacto:\n"
+        "Solve this math problem.\n"
+        "ALWAYS return exactly this format:\n"
         "<reasoning>\n"
-        "- pasos cortos y concretos (maximo 5 lineas)\n"
+        "- short, concrete steps (maximum 5 lines)\n"
         "</reasoning>\n"
         "<final>\n"
-        "- solo el numero final\n"
+        "- only the final number\n"
         "</final>\n\n"
-        f"Problema: {question}\n"
+        f"Problem: {question}\n"
     )
 
 
@@ -343,7 +381,30 @@ def load_teacher(
         model_kwargs["dtype"] = torch.float32
         model_kwargs["device_map"] = {"": "cpu"}
 
-    model = AutoModelForCausalLM.from_pretrained(teacher_model, **model_kwargs)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(teacher_model, **model_kwargs)
+    except ValueError as exc:
+        requested_attn = str(model_kwargs.get("attn_implementation", "auto"))
+        can_fallback = (
+            requested_attn not in ("auto", "eager")
+            and "attn_implementation" in model_kwargs
+            and (
+                "scaled_dot_product_attention" in str(exc)
+                or "attn_implementation=\"eager\"" in str(exc)
+                or "does not support an attention implementation" in str(exc)
+            )
+        )
+        if not can_fallback:
+            raise
+        model_kwargs["attn_implementation"] = "eager"
+        print(
+            (
+                f"[warn] teacher model does not support attn_implementation="
+                f"{requested_attn}; retrying with eager"
+            ),
+            flush=True,
+        )
+        model = AutoModelForCausalLM.from_pretrained(teacher_model, **model_kwargs)
     model.eval()
     return tokenizer, model
 
@@ -387,6 +448,57 @@ def generate_batch(
     prompt_len = encoded["input_ids"].shape[1]
     generated_only = generated[:, prompt_len:]
     return tokenizer.batch_decode(generated_only, skip_special_tokens=True)
+
+
+def init_wandb_run(
+    args: argparse.Namespace,
+    dtype: torch.dtype,
+    total_examples: int,
+) -> Any | None:
+    """Initialize optional Weights & Biases run."""
+    if not args.wandb_enabled:
+        return None
+    try:
+        import wandb
+    except ImportError as exc:
+        raise RuntimeError(
+            "Missing dependency `wandb`. Install with: uv pip install wandb"
+        ) from exc
+
+    tags = [tag.strip() for tag in args.wandb_tags.split(",") if tag.strip()]
+    run = wandb.init(
+        project=args.wandb_project,
+        entity=args.wandb_entity or None,
+        name=args.wandb_run_name or None,
+        group=args.wandb_group or None,
+        tags=tags,
+        mode=args.wandb_mode,
+        config={
+            "teacher_model": args.teacher_model,
+            "dataset_name": args.dataset_name,
+            "dataset_config": args.dataset_config,
+            "split": args.split,
+            "start_index": args.start_index,
+            "max_examples": args.max_examples,
+            "batch_size": args.batch_size,
+            "max_input_length": args.max_input_length,
+            "max_new_tokens": args.max_new_tokens,
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "dtype": str(dtype),
+            "attn_implementation": args.attn_implementation,
+            "use_chat_template": args.use_chat_template,
+            "include_incorrect": args.include_incorrect,
+            "normalize_tags": args.normalize_tags,
+            "total_examples": total_examples,
+            "output_path": args.output_path,
+        },
+    )
+    run.define_metric("attempted")
+    run.define_metric("distill/*", step_metric="attempted")
+    if getattr(run, "url", None):
+        print(f"[wandb] run_url={run.url}", flush=True)
+    return run
 
 
 def main() -> int:
@@ -453,6 +565,37 @@ def main() -> int:
     parsed_final = 0
     progress = None
     total_examples = end_index - start_index
+    wandb_run = init_wandb_run(args=args, dtype=dtype, total_examples=total_examples)
+    started_at = time.perf_counter()
+    last_logged_attempted = 0
+
+    def log_metrics(force: bool = False) -> None:
+        nonlocal last_logged_attempted
+        if wandb_run is None:
+            return
+        if attempted == 0 and not force:
+            return
+        if not force and (attempted - last_logged_attempted) < max(1, args.log_interval):
+            return
+        elapsed_s = max(1e-9, time.perf_counter() - started_at)
+        keep_rate = (kept / attempted) if attempted else 0.0
+        acc_estimate = (correct / attempted) if attempted else 0.0
+        parse_rate = (parsed_final / attempted) if attempted else 0.0
+        ex_per_sec = (attempted / elapsed_s) if attempted else 0.0
+        wandb_run.log(
+            {
+                "attempted": attempted,
+                "distill/kept": kept,
+                "distill/correct": correct,
+                "distill/parsed_final": parsed_final,
+                "distill/keep_rate": keep_rate,
+                "distill/accuracy_estimate": acc_estimate,
+                "distill/parse_rate": parse_rate,
+                "distill/examples_per_sec": ex_per_sec,
+            }
+        )
+        last_logged_attempted = attempted
+
     if args.progress_bar and tqdm is not None:
         progress = tqdm(
             total=total_examples,
@@ -460,6 +603,7 @@ def main() -> int:
             unit="ex",
             dynamic_ncols=True,
         )
+    log_metrics(force=True)
 
     with output_path.open("w", encoding="utf-8") as handle:
         for batch_start in range(start_index, end_index, args.batch_size):
@@ -530,14 +674,15 @@ def main() -> int:
             processed_this_batch = len(outputs)
             if progress is not None:
                 progress.update(processed_this_batch)
-                if attempted % args.log_interval == 0:
+                if (attempted - last_logged_attempted) >= max(1, args.log_interval):
                     progress.set_postfix(
                         attempted=attempted,
                         kept=kept,
                         correct=correct,
                         parsed=parsed_final,
                     )
-            elif attempted % args.log_interval == 0:
+                    log_metrics()
+            elif (attempted - last_logged_attempted) >= max(1, args.log_interval):
                 print(
                     (
                         f"[progress] attempted={attempted} kept={kept} "
@@ -545,6 +690,7 @@ def main() -> int:
                     ),
                     flush=True,
                 )
+                log_metrics()
 
     if progress is not None:
         progress.set_postfix(
@@ -572,6 +718,10 @@ def main() -> int:
         "output_path": str(output_path),
     }
     meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    if wandb_run is not None:
+        log_metrics(force=True)
+        wandb_run.summary.update(metadata)
+        wandb_run.finish()
     print(f"[done] wrote dataset to {output_path}", flush=True)
     print(f"[done] wrote metadata to {meta_path}", flush=True)
     return 0

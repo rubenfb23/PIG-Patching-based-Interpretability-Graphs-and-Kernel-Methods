@@ -6,6 +6,8 @@ usage() {
 Run teacher distillation (GSM8K) + student GPT-2 finetuning, sequentially.
 
 Default behavior uses the FULL dataset (max-examples = -1).
+If `--distilled-path` already exists and is non-empty, distillation is skipped
+and the script goes directly to finetuning.
 
 Usage:
   src/gpt2/run_distill_and_finetune.sh [options]
@@ -15,19 +17,26 @@ Options:
   --student-model <name>       Student model (default: gpt2)
   --distilled-path <path>      Output JSONL for distilled data
   --student-output-dir <path>  Output directory for finetuned model
-  --batch-size <int>           Teacher generation batch size (default: 1)
+  --batch-size <int>           Teacher generation batch size (default: 24)
+  --student-batch-size <int>   Student micro-batch size per GPU (default: 2)
+  --student-grad-accum-steps <int> Student gradient accumulation steps (default: 8)
+  --student-lr <float>         Student learning rate (default: 5e-5)
+  --student-warmup-ratio <float> Student LR warmup ratio (default: 0.03)
+  --student-weight-decay <float> Student weight decay (default: 0.1)
+  --student-max-grad-norm <float> Student grad clip norm (default: 1.0)
   --dtype <auto|bf16|fp16|fp32> Teacher dtype (default: bf16)
   --attn-implementation <str>  Teacher attention implementation (default: eager)
-  --max-gpu-memory-gib <float> Per-GPU cap for teacher load (default: 0 auto)
+  --max-gpu-memory-gib <float> Per-GPU cap for teacher load (default: 22)
   --gpu-memory-reserve-gib <float> Reserve per GPU when auto cap (default: 2)
-  --cpu-offload-gib <float>    CPU RAM budget for offload (default: 96)
+  --cpu-offload-gib <float>    CPU RAM budget for offload (default: 0)
   --offload-folder <path>      Offload folder (default: outputs/offload/gpt_oss_teacher)
   --mxfp4-dequantize | --no-mxfp4-dequantize
                                GPT-OSS dequantize mode (default: enabled)
   --max-examples <int>         Distillation sample cap; -1 means full dataset (default: -1)
   --seq-len <int>              Student training sequence length (default: 512)
-  --epochs <int>               Student training epochs (default: 3)
+  --epochs <int>               Student training epochs (default: 8)
   --nproc-per-node <int>       GPUs/processes for torchrun (default: auto-detect)
+  --force-distill              Force re-running distillation even if distilled data exists
   --extra-distill-args "<str>" Extra args passed to gpt2.distill_gsm8k
   --extra-train-args "<str>"   Extra args passed to gpt2.finetuning
   -h, --help                   Show this help
@@ -42,20 +51,27 @@ TEACHER_MODEL="openai/gpt-oss-20b"
 STUDENT_MODEL="gpt2"
 DISTILLED_PATH="outputs/gsm8k_distilled_gptoss20b.jsonl"
 STUDENT_OUTPUT_DIR="outputs/gpt2_gsm8k_distilled"
-BATCH_SIZE=1
+BATCH_SIZE=24
+STUDENT_BATCH_SIZE=24
+STUDENT_GRAD_ACCUM_STEPS=8
+STUDENT_LR="2e-5"
+STUDENT_WARMUP_RATIO="0.03"
+STUDENT_WEIGHT_DECAY="0.1"
+STUDENT_MAX_GRAD_NORM="1.0"
 DTYPE="bf16"
 ATTN_IMPLEMENTATION="eager"
-MAX_GPU_MEMORY_GIB=0
+MAX_GPU_MEMORY_GIB=22
 GPU_MEMORY_RESERVE_GIB=2
-CPU_OFFLOAD_GIB=96
+CPU_OFFLOAD_GIB=0
 OFFLOAD_FOLDER="outputs/offload/gpt_oss_teacher"
 MXFP4_DEQUANTIZE="--mxfp4-dequantize"
 MAX_EXAMPLES=-1
 SEQ_LEN=512
-EPOCHS=3
+EPOCHS=8
 NPROC_PER_NODE=""
-EXTRA_DISTILL_ARGS=""
-EXTRA_TRAIN_ARGS=""
+FORCE_DISTILL=0
+EXTRA_DISTILL_ARGS="--max-new-tokens 192 --log-interval 5 --wandb-enabled --wandb-project pig-distill --wandb-run-name distill_full --wandb-tags distill,gsm8k,gptoss20b"
+EXTRA_TRAIN_ARGS="--val-ratio 0.1 --test-ratio 0.1 --test-eval-every-epochs 1 --early-stopping-patience 5 --early-stopping-min-delta 0.002 --early-stopping-warmup-epochs 1 --no-compile --wandb-enabled --wandb-project pig-finetune --wandb-run-name gpt2_gsm8k_split3 --wandb-tags finetune,gpt2,gsm8k"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -77,6 +93,30 @@ while [[ $# -gt 0 ]]; do
       ;;
     --batch-size)
       BATCH_SIZE="$2"
+      shift 2
+      ;;
+    --student-batch-size)
+      STUDENT_BATCH_SIZE="$2"
+      shift 2
+      ;;
+    --student-grad-accum-steps)
+      STUDENT_GRAD_ACCUM_STEPS="$2"
+      shift 2
+      ;;
+    --student-lr)
+      STUDENT_LR="$2"
+      shift 2
+      ;;
+    --student-warmup-ratio)
+      STUDENT_WARMUP_RATIO="$2"
+      shift 2
+      ;;
+    --student-weight-decay)
+      STUDENT_WEIGHT_DECAY="$2"
+      shift 2
+      ;;
+    --student-max-grad-norm)
+      STUDENT_MAX_GRAD_NORM="$2"
       shift 2
       ;;
     --dtype)
@@ -127,6 +167,10 @@ while [[ $# -gt 0 ]]; do
       NPROC_PER_NODE="$2"
       shift 2
       ;;
+    --force-distill)
+      FORCE_DISTILL=1
+      shift 1
+      ;;
     --extra-distill-args)
       EXTRA_DISTILL_ARGS="$2"
       shift 2
@@ -159,51 +203,121 @@ if [[ "${NPROC_PER_NODE}" -lt 1 ]]; then
   NPROC_PER_NODE=1
 fi
 
+if [[ "${STUDENT_BATCH_SIZE}" -lt 1 ]]; then
+  echo "[error] --student-batch-size must be >= 1 (got ${STUDENT_BATCH_SIZE})." >&2
+  exit 1
+fi
+
+if [[ "${STUDENT_GRAD_ACCUM_STEPS}" -lt 1 ]]; then
+  echo "[error] --student-grad-accum-steps must be >= 1 (got ${STUDENT_GRAD_ACCUM_STEPS})." >&2
+  exit 1
+fi
+
+if [[ "${EXTRA_TRAIN_ARGS}" == *"--micro-batch-size"* ]]; then
+  echo "[error] Do not pass --micro-batch-size inside --extra-train-args." >&2
+  echo "[hint] Use --student-batch-size <int> instead." >&2
+  exit 1
+fi
+
+if [[ "${EXTRA_TRAIN_ARGS}" == *"--grad-accum-steps"* ]]; then
+  echo "[error] Do not pass --grad-accum-steps inside --extra-train-args." >&2
+  echo "[hint] Use --student-grad-accum-steps <int> instead." >&2
+  exit 1
+fi
+
+if [[ "${EXTRA_TRAIN_ARGS}" == *"--lr"* ]]; then
+  echo "[error] Do not pass --lr inside --extra-train-args." >&2
+  echo "[hint] Use --student-lr <float> instead." >&2
+  exit 1
+fi
+
+if [[ "${EXTRA_TRAIN_ARGS}" == *"--warmup-ratio"* ]]; then
+  echo "[error] Do not pass --warmup-ratio inside --extra-train-args." >&2
+  echo "[hint] Use --student-warmup-ratio <float> instead." >&2
+  exit 1
+fi
+
+if [[ "${EXTRA_TRAIN_ARGS}" == *"--weight-decay"* ]]; then
+  echo "[error] Do not pass --weight-decay inside --extra-train-args." >&2
+  echo "[hint] Use --student-weight-decay <float> instead." >&2
+  exit 1
+fi
+
+if [[ "${EXTRA_TRAIN_ARGS}" == *"--max-grad-norm"* ]]; then
+  echo "[error] Do not pass --max-grad-norm inside --extra-train-args." >&2
+  echo "[hint] Use --student-max-grad-norm <float> instead." >&2
+  exit 1
+fi
+
 mkdir -p "$(dirname "${DISTILLED_PATH}")" "${STUDENT_OUTPUT_DIR}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
-if ! PYTHONPATH=src uv run python - <<'PY'
+DISTILLED_LINES=0
+if [[ -f "${DISTILLED_PATH}" ]]; then
+  DISTILLED_LINES="$(wc -l < "${DISTILLED_PATH}" | tr -d ' ')"
+fi
+
+RUN_DISTILL=1
+if [[ "${FORCE_DISTILL}" -eq 0 && "${DISTILLED_LINES}" -gt 0 ]]; then
+  RUN_DISTILL=0
+  echo "[1/2] Reusing existing distilled dataset at ${DISTILLED_PATH} (rows=${DISTILLED_LINES})"
+fi
+
+if [[ "${RUN_DISTILL}" -eq 1 ]]; then
+  if ! PYTHONPATH=src uv run python - <<'PY'
 import importlib.util
 ok = all(importlib.util.find_spec(pkg) is not None for pkg in ("datasets", "accelerate"))
 raise SystemExit(0 if ok else 1)
 PY
-then
-  echo "[deps] Installing distillation extras (datasets, accelerate)..."
-  uv pip install datasets accelerate
+  then
+    echo "[deps] Installing distillation extras (datasets, accelerate)..."
+    uv pip install datasets accelerate
+  fi
+
+  # Avoid stale/mismatched metadata from previous interrupted runs.
+  rm -f "${DISTILLED_PATH}" "${DISTILLED_PATH}.meta.json"
+
+  echo "[1/2] Distilling GSM8K with teacher=${TEACHER_MODEL} (max-examples=${MAX_EXAMPLES})"
+  DISTILL_CMD=(
+    uv run python -m gpt2.distill_gsm8k
+    --teacher-model "${TEACHER_MODEL}"
+    --output-path "${DISTILLED_PATH}"
+    --max-examples "${MAX_EXAMPLES}"
+    --batch-size "${BATCH_SIZE}"
+    --dtype "${DTYPE}"
+    --attn-implementation "${ATTN_IMPLEMENTATION}"
+    --max-gpu-memory-gib "${MAX_GPU_MEMORY_GIB}"
+    --gpu-memory-reserve-gib "${GPU_MEMORY_RESERVE_GIB}"
+    --cpu-offload-gib "${CPU_OFFLOAD_GIB}"
+    --offload-folder "${OFFLOAD_FOLDER}"
+    "${MXFP4_DEQUANTIZE}"
+  )
+  if [[ -n "${EXTRA_DISTILL_ARGS}" ]]; then
+    # shellcheck disable=SC2206
+    EXTRA_DISTILL_ARRAY=(${EXTRA_DISTILL_ARGS})
+    DISTILL_CMD+=("${EXTRA_DISTILL_ARRAY[@]}")
+  fi
+  PYTHONPATH=src "${DISTILL_CMD[@]}"
+
+  DISTILLED_LINES="$(wc -l < "${DISTILLED_PATH}" | tr -d ' ')"
 fi
 
-echo "[1/2] Distilling GSM8K with teacher=${TEACHER_MODEL} (max-examples=${MAX_EXAMPLES})"
-DISTILL_CMD=(
-  uv run python -m gpt2.distill_gsm8k
-  --teacher-model "${TEACHER_MODEL}"
-  --output-path "${DISTILLED_PATH}"
-  --max-examples "${MAX_EXAMPLES}"
-  --batch-size "${BATCH_SIZE}"
-  --dtype "${DTYPE}"
-  --attn-implementation "${ATTN_IMPLEMENTATION}"
-  --max-gpu-memory-gib "${MAX_GPU_MEMORY_GIB}"
-  --gpu-memory-reserve-gib "${GPU_MEMORY_RESERVE_GIB}"
-  --cpu-offload-gib "${CPU_OFFLOAD_GIB}"
-  --offload-folder "${OFFLOAD_FOLDER}"
-  "${MXFP4_DEQUANTIZE}"
-)
-if [[ -n "${EXTRA_DISTILL_ARGS}" ]]; then
-  # shellcheck disable=SC2206
-  EXTRA_DISTILL_ARRAY=(${EXTRA_DISTILL_ARGS})
-  DISTILL_CMD+=("${EXTRA_DISTILL_ARRAY[@]}")
-fi
-PYTHONPATH=src "${DISTILL_CMD[@]}"
-
-DISTILLED_LINES="$(wc -l < "${DISTILLED_PATH}" | tr -d ' ')"
 if [[ "${DISTILLED_LINES}" -eq 0 ]]; then
-  echo "[error] Distillation produced 0 rows at ${DISTILLED_PATH}." >&2
-  echo "[error] Try increasing --max-new-tokens and keep chat template enabled." >&2
-  echo "[hint] Example: --extra-distill-args \"--max-new-tokens 192 --log-interval 5\"" >&2
+  echo "[error] Distilled dataset has 0 rows at ${DISTILLED_PATH}." >&2
+  echo "[error] Provide a non-empty pre-distilled file or run distillation first." >&2
+  echo "[hint] Example: src/gpt2/run_distill_and_finetune.sh --force-distill" >&2
   exit 1
 fi
+
 echo "[info] distilled rows=${DISTILLED_LINES}"
+if [[ "${DISTILLED_LINES}" -lt 64 ]]; then
+  echo "[warn] Distilled dataset is very small (${DISTILLED_LINES} rows)." >&2
+  echo "[warn] Finetuning will run, but quality is likely poor. Increase --max-examples." >&2
+fi
 
 echo "[2/2] Finetuning student=${STUDENT_MODEL} (nproc_per_node=${NPROC_PER_NODE})"
+echo "[2/2] student micro-batch-size=${STUDENT_BATCH_SIZE}"
+echo "[2/2] student grad-accum=${STUDENT_GRAD_ACCUM_STEPS} lr=${STUDENT_LR} warmup=${STUDENT_WARMUP_RATIO} wd=${STUDENT_WEIGHT_DECAY} max-grad-norm=${STUDENT_MAX_GRAD_NORM}"
 TRAIN_CMD=(
   uv run torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}"
   -m gpt2.finetuning
@@ -213,6 +327,12 @@ TRAIN_CMD=(
   --output-dir "${STUDENT_OUTPUT_DIR}"
   --seq-len "${SEQ_LEN}"
   --epochs "${EPOCHS}"
+  --micro-batch-size "${STUDENT_BATCH_SIZE}"
+  --grad-accum-steps "${STUDENT_GRAD_ACCUM_STEPS}"
+  --lr "${STUDENT_LR}"
+  --warmup-ratio "${STUDENT_WARMUP_RATIO}"
+  --weight-decay "${STUDENT_WEIGHT_DECAY}"
+  --max-grad-norm "${STUDENT_MAX_GRAD_NORM}"
 )
 if [[ -n "${EXTRA_TRAIN_ARGS}" ]]; then
   # shellcheck disable=SC2206
@@ -220,5 +340,29 @@ if [[ -n "${EXTRA_TRAIN_ARGS}" ]]; then
   TRAIN_CMD+=("${EXTRA_TRAIN_ARRAY[@]}")
 fi
 PYTHONPATH=src "${TRAIN_CMD[@]}"
+
+LAST_CKPT="${STUDENT_OUTPUT_DIR}/checkpoints/last.pt"
+if [[ ! -f "${LAST_CKPT}" ]]; then
+  echo "[error] Missing checkpoint: ${LAST_CKPT}" >&2
+  exit 1
+fi
+
+GLOBAL_STEP="$(
+  LAST_CKPT_PATH="${LAST_CKPT}" PYTHONPATH=src uv run python - <<'PY'
+import os
+import torch
+
+path = os.environ["LAST_CKPT_PATH"]
+payload = torch.load(path, map_location="cpu")
+print(int(payload.get("global_step", -1)))
+PY
+)"
+
+if [[ "${GLOBAL_STEP}" -lt 1 ]]; then
+  echo "[error] Finetuning completed with global_step=${GLOBAL_STEP} (no optimizer updates)." >&2
+  echo "[hint] Try lowering --seq-len and/or set --student-batch-size 1 and --student-grad-accum-steps 1." >&2
+  exit 1
+fi
+echo "[info] finetuning global_step=${GLOBAL_STEP}"
 
 echo "[done] Distillation + finetuning completed."
