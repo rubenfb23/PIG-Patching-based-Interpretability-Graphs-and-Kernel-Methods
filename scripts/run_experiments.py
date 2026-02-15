@@ -21,7 +21,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from clmi.kernels.curriculum import greedy_curriculum
-from clmi.kernels.kernels import k_func, k_nc, k_proj
+## k_proj / k_nc / k_func are computed inline in _build_task_kernel_matrices (optimised)
 from clmi.kernels.predict import fit_kernel_ridge_predictor
 from clmi.metrics.statistics import compute_correlation_table
 from clmi.utils.io import figures_dir, save_csv, save_json, tables_dir
@@ -190,38 +190,51 @@ def _run_one(cmd: list[str], gpu_id: int, run_idx: int, total: int, run_id: str,
     return run_id, proc.returncode
 
 
-def _load_projectors_from_run(run_id: str, task_label: str) -> dict[int, np.ndarray] | None:
+def _load_bases_from_run(run_id: str, task_label: str) -> dict[int, np.ndarray] | None:
+    """Load raw U bases (not expanded projectors) from a run.
+
+    Returns {layer: U} where U has shape (d, r) with orthonormal columns,
+    or None if the file does not exist.
+    """
     path = Path("results") / "runs" / run_id / f"bases_{task_label}.npz"
     if not path.exists():
         return None
 
     data = np.load(path)
-    projectors: dict[int, np.ndarray] = {}
+    bases: dict[int, np.ndarray] = {}
     for key in data.files:
         if not key.startswith("U_"):
             continue
         layer = int(key.split("_")[1])
-        U = data[key]
-        projectors[layer] = U @ U.T
-    return projectors
+        bases[layer] = data[key]  # shape (d, r), e.g. (768, 16)
+    return bases
 
 
 def _build_task_kernel_matrices(summary: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
     """Build K_proj, K_nc, and K_func matrices from saved run artifacts.
 
+    Uses an optimised path that works directly with the raw U bases
+    (shape d×r, e.g. 768×16) instead of the expanded projector P = UU^T
+    (768×768).  The kernel values are mathematically identical:
+
+        k_proj:  Tr(P_i P_j) = ||U_i^T U_j||_F^2
+        k_nc:    exp(-γ Σ_l ||[P_i,P_j]||_F^2)
+                 where ||[P,Q]||_F^2 = 2(||S||_F^2 − ||S^T S||_F^2), S = U_i^T U_j
+
     Returns (K_proj, K_nc, K_func, labels).
     """
     labels: list[str] = []
-    projector_bank: list[dict[int, np.ndarray]] = []
+    bases_bank: list[dict[int, np.ndarray]] = []
     phi_bank: list[np.ndarray | None] = []
 
+    print("Loading bases for kernel matrix construction...")
     for _, row in summary.iterrows():
         run_id = str(row["run_id"])
-        proj = _load_projectors_from_run(run_id, "A")
-        if proj is None:
+        bases = _load_bases_from_run(run_id, "A")
+        if bases is None:
             continue
         labels.append(run_id)
-        projector_bank.append(proj)
+        bases_bank.append(bases)
 
         # Load phi embeddings if available
         phi_path = Path("results") / "runs" / run_id / "phi_embeddings.npz"
@@ -231,28 +244,53 @@ def _build_task_kernel_matrices(summary: pd.DataFrame) -> tuple[np.ndarray, np.n
         else:
             phi_bank.append(None)
 
-    n = len(projector_bank)
+    n = len(bases_bank)
     if n == 0:
         return np.zeros((0, 0)), np.zeros((0, 0)), np.zeros((0, 0)), labels
+
+    total_pairs = n * (n + 1) // 2
+    print(f"Computing {n}×{n} kernel matrices ({total_pairs:,} pairs)...")
 
     K_proj = np.zeros((n, n), dtype=np.float32)
     K_nc = np.zeros((n, n), dtype=np.float32)
     K_func = np.zeros((n, n), dtype=np.float32)
+    gamma = 0.1
+    done = 0
+    report_every = max(1, total_pairs // 20)  # report ~20 times
+
     for i in range(n):
         for j in range(i, n):
-            kp = k_proj(projector_bank[i], projector_bank[j])
-            kn = k_nc(projector_bank[i], projector_bank[j], gamma=0.1)
-            K_proj[i, j] = kp
-            K_proj[j, i] = kp
+            # --- k_proj and k_nc from raw bases (16-dim, not 768-dim) ---
+            shared = sorted(set(bases_bank[i]) & set(bases_bank[j]))
+            kp_sum = 0.0
+            comm_sum = 0.0
+            for l in shared:
+                # S = U_i^T U_j  — shape (r, r), e.g. (16, 16)
+                S = bases_bank[i][l].T @ bases_bank[j][l]
+                s_fro_sq = float((S * S).sum())       # ||S||_F^2
+                kp_sum += s_fro_sq                     # Tr(P_i P_j) per layer
+                StS = S.T @ S                          # (r, r)
+                # ||[P_i,P_j]||_F^2 per layer = 2(||S||_F^2 − ||S^T S||_F^2)
+                comm_sum += 2.0 * (s_fro_sq - float((StS * StS).sum()))
+
+            K_proj[i, j] = kp_sum
+            K_proj[j, i] = kp_sum
+            kn = float(np.exp(-gamma * comm_sum))
             K_nc[i, j] = kn
             K_nc[j, i] = kn
 
             # k_func from phi embeddings
             if phi_bank[i] is not None and phi_bank[j] is not None:
-                kf = k_func(phi_bank[i], phi_bank[j], kind="linear", gamma=0.1)
+                kf = float(np.dot(phi_bank[i], phi_bank[j]))
                 K_func[i, j] = kf
                 K_func[j, i] = kf
 
+            done += 1
+            if done % report_every == 0:
+                pct = done / total_pairs * 100
+                print(f"  kernel progress: {done:,}/{total_pairs:,} pairs ({pct:.0f}%)")
+
+    print("Kernel matrices complete.")
     return K_proj, K_nc, K_func, labels
 
 
