@@ -20,6 +20,7 @@ Options:
   --batch-size <int>           Teacher generation batch size (default: 24)
   --student-batch-size <int>   Student micro-batch size per GPU (default: 2)
   --student-grad-accum-steps <int> Student gradient accumulation steps (default: 8)
+  --student-num-workers <int>  Student DataLoader workers per process (default: 2)
   --student-lr <float>         Student learning rate (default: 5e-5)
   --student-warmup-ratio <float> Student LR warmup ratio (default: 0.03)
   --student-weight-decay <float> Student weight decay (default: 0.1)
@@ -52,9 +53,10 @@ STUDENT_MODEL="gpt2"
 DISTILLED_PATH="outputs/gsm8k_distilled_gptoss20b.jsonl"
 STUDENT_OUTPUT_DIR="outputs/gpt2_gsm8k_distilled"
 BATCH_SIZE=24
-STUDENT_BATCH_SIZE=24
-STUDENT_GRAD_ACCUM_STEPS=8
-STUDENT_LR="2e-5"
+STUDENT_BATCH_SIZE=4
+STUDENT_GRAD_ACCUM_STEPS=6
+STUDENT_NUM_WORKERS=3
+STUDENT_LR="5e-5"
 STUDENT_WARMUP_RATIO="0.03"
 STUDENT_WEIGHT_DECAY="0.1"
 STUDENT_MAX_GRAD_NORM="1.0"
@@ -71,7 +73,7 @@ EPOCHS=8
 NPROC_PER_NODE=""
 FORCE_DISTILL=0
 EXTRA_DISTILL_ARGS="--max-new-tokens 192 --log-interval 5 --wandb-enabled --wandb-project pig-distill --wandb-run-name distill_full --wandb-tags distill,gsm8k,gptoss20b"
-EXTRA_TRAIN_ARGS="--val-ratio 0.1 --test-ratio 0.1 --test-eval-every-epochs 1 --early-stopping-patience 5 --early-stopping-min-delta 0.002 --early-stopping-warmup-epochs 1 --no-compile --wandb-enabled --wandb-project pig-finetune --wandb-run-name gpt2_gsm8k_split3 --wandb-tags finetune,gpt2,gsm8k"
+EXTRA_TRAIN_ARGS="--response-only-loss --val-ratio 0.1 --test-ratio 0.1 --test-eval-every-epochs 1 --epoch-compare-num-examples 512 --early-stopping-patience 5 --early-stopping-min-delta 0.002 --early-stopping-warmup-epochs 1 --no-compile --wandb-enabled --wandb-project pig-finetune --wandb-run-name gpt2_gsm8k_response_only --wandb-tags finetune,gpt2,gsm8k,response_only"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -101,6 +103,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --student-grad-accum-steps)
       STUDENT_GRAD_ACCUM_STEPS="$2"
+      shift 2
+      ;;
+    --student-num-workers)
+      STUDENT_NUM_WORKERS="$2"
       shift 2
       ;;
     --student-lr)
@@ -213,6 +219,11 @@ if [[ "${STUDENT_GRAD_ACCUM_STEPS}" -lt 1 ]]; then
   exit 1
 fi
 
+if [[ "${STUDENT_NUM_WORKERS}" -lt 0 ]]; then
+  echo "[error] --student-num-workers must be >= 0 (got ${STUDENT_NUM_WORKERS})." >&2
+  exit 1
+fi
+
 if [[ "${EXTRA_TRAIN_ARGS}" == *"--micro-batch-size"* ]]; then
   echo "[error] Do not pass --micro-batch-size inside --extra-train-args." >&2
   echo "[hint] Use --student-batch-size <int> instead." >&2
@@ -222,6 +233,12 @@ fi
 if [[ "${EXTRA_TRAIN_ARGS}" == *"--grad-accum-steps"* ]]; then
   echo "[error] Do not pass --grad-accum-steps inside --extra-train-args." >&2
   echo "[hint] Use --student-grad-accum-steps <int> instead." >&2
+  exit 1
+fi
+
+if [[ "${EXTRA_TRAIN_ARGS}" == *"--num-workers"* ]]; then
+  echo "[error] Do not pass --num-workers inside --extra-train-args." >&2
+  echo "[hint] Use --student-num-workers <int> instead." >&2
   exit 1
 fi
 
@@ -317,6 +334,7 @@ fi
 
 echo "[2/2] Finetuning student=${STUDENT_MODEL} (nproc_per_node=${NPROC_PER_NODE})"
 echo "[2/2] student micro-batch-size=${STUDENT_BATCH_SIZE}"
+echo "[2/2] student num-workers=${STUDENT_NUM_WORKERS}"
 echo "[2/2] student grad-accum=${STUDENT_GRAD_ACCUM_STEPS} lr=${STUDENT_LR} warmup=${STUDENT_WARMUP_RATIO} wd=${STUDENT_WEIGHT_DECAY} max-grad-norm=${STUDENT_MAX_GRAD_NORM}"
 TRAIN_CMD=(
   uv run torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}"
@@ -329,6 +347,7 @@ TRAIN_CMD=(
   --epochs "${EPOCHS}"
   --micro-batch-size "${STUDENT_BATCH_SIZE}"
   --grad-accum-steps "${STUDENT_GRAD_ACCUM_STEPS}"
+  --num-workers "${STUDENT_NUM_WORKERS}"
   --lr "${STUDENT_LR}"
   --warmup-ratio "${STUDENT_WARMUP_RATIO}"
   --weight-decay "${STUDENT_WEIGHT_DECAY}"

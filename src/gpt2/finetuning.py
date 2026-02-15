@@ -19,6 +19,7 @@ import json
 import math
 import os
 import random
+import re
 import sysconfig
 import time
 from contextlib import nullcontext
@@ -39,6 +40,7 @@ except Exception:  # pragma: no cover - optional dependency
     tqdm = None
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+PACKING_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,36 @@ class DistContext:
     local_rank: int
     world_size: int
     device: torch.device
+
+
+@dataclass(frozen=True)
+class StructuredEvalExample:
+    """One structured example for epoch-wise generation comparison."""
+
+    dataset_index: int
+    prompt: str
+    gold_final: str
+
+
+@dataclass(frozen=True)
+class GenerationEvalResult:
+    """Aggregated generation metrics on a fixed evaluation subset."""
+
+    parsed: int
+    correct: int
+    accuracy: float
+    parsed_rate: float
+    predictions: list[str]
+    correct_flags: list[bool]
+
+
+@dataclass(frozen=True)
+class PromptCompletionSample:
+    """A structured supervised sample with prompt and completion fields."""
+
+    prompt: str
+    completion: str
+    fallback_text: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,6 +97,15 @@ def parse_args() -> argparse.Namespace:
         "--text-key",
         default="text",
         help="Field name containing text when using .jsonl/.json input.",
+    )
+    parser.add_argument(
+        "--response-only-loss",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "When prompt/completion fields are available, mask prompt tokens and "
+            "optimize loss only on completion tokens."
+        ),
     )
     parser.add_argument("--model-name", default="gpt2")
     parser.add_argument("--output-dir", default="outputs/gpt2_finetune")
@@ -202,6 +243,48 @@ def parse_args() -> argparse.Namespace:
         default="online",
         help="W&B mode.",
     )
+    parser.add_argument(
+        "--epoch-compare-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run generation comparison (original vs finetuned) every epoch.",
+    )
+    parser.add_argument(
+        "--epoch-compare-num-examples",
+        type=int,
+        default=64,
+        help="Number of held-out structured examples for epoch comparison.",
+    )
+    parser.add_argument(
+        "--epoch-compare-batch-size",
+        type=int,
+        default=8,
+        help="Batch size used during epoch generation comparison.",
+    )
+    parser.add_argument(
+        "--epoch-compare-max-input-length",
+        type=int,
+        default=768,
+        help="Max prompt tokens for epoch generation comparison.",
+    )
+    parser.add_argument(
+        "--epoch-compare-max-new-tokens",
+        type=int,
+        default=192,
+        help="Max generation tokens for epoch generation comparison.",
+    )
+    parser.add_argument(
+        "--epoch-compare-temperature",
+        type=float,
+        default=0.0,
+        help="Sampling temperature for epoch generation comparison.",
+    )
+    parser.add_argument(
+        "--epoch-compare-top-p",
+        type=float,
+        default=0.95,
+        help="Top-p for epoch generation comparison when sampling is enabled.",
+    )
     parser.add_argument("--log-interval", type=int, default=20)
     parser.add_argument(
         "--progress-bar",
@@ -298,6 +381,7 @@ def init_wandb_run(
         config={
             "data_path": args.data_path,
             "text_key": args.text_key,
+            "response_only_loss": args.response_only_loss,
             "model_name": args.model_name,
             "seq_len": args.seq_len,
             "val_ratio": args.val_ratio,
@@ -319,6 +403,13 @@ def init_wandb_run(
             "compare_base_on_test": args.compare_base_on_test,
             "base_model_name": args.base_model_name or args.model_name,
             "test_eval_every_epochs": args.test_eval_every_epochs,
+            "epoch_compare_enabled": args.epoch_compare_enabled,
+            "epoch_compare_num_examples": args.epoch_compare_num_examples,
+            "epoch_compare_batch_size": args.epoch_compare_batch_size,
+            "epoch_compare_max_input_length": args.epoch_compare_max_input_length,
+            "epoch_compare_max_new_tokens": args.epoch_compare_max_new_tokens,
+            "epoch_compare_temperature": args.epoch_compare_temperature,
+            "epoch_compare_top_p": args.epoch_compare_top_p,
         },
     )
     run.define_metric("train/global_step")
@@ -326,6 +417,7 @@ def init_wandb_run(
     run.define_metric("epoch")
     run.define_metric("val/*", step_metric="epoch")
     run.define_metric("test/*", step_metric="epoch")
+    run.define_metric("compare/*", step_metric="epoch")
     return run
 
 
@@ -483,12 +575,59 @@ def read_text_samples(
     return samples
 
 
+def read_prompt_completion_samples(
+    data_path: Path,
+    text_key: str,
+) -> list[PromptCompletionSample]:
+    """Read structured prompt/completion pairs from jsonl/json."""
+    if not data_path.is_file():
+        raise FileNotFoundError(f"Dataset file not found: {data_path}")
+
+    suffix = data_path.suffix.lower()
+    parsed_rows: list[PromptCompletionSample] = []
+
+    def maybe_append(record: dict[str, Any]) -> None:
+        prompt = str(record.get("prompt", "")).strip()
+        completion = str(record.get("completion", "")).strip()
+        if not prompt or not completion:
+            return
+        fallback_text = str(record.get(text_key, f"{prompt}{completion}")).strip()
+        if not fallback_text:
+            fallback_text = f"{prompt}{completion}"
+        parsed_rows.append(
+            PromptCompletionSample(
+                prompt=prompt,
+                completion=completion,
+                fallback_text=fallback_text,
+            )
+        )
+
+    if suffix == ".jsonl":
+        with data_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)
+                if isinstance(record, dict):
+                    maybe_append(record)
+    elif suffix == ".json":
+        payload = json.loads(data_path.read_text(encoding="utf-8"))
+        if isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, dict):
+                    maybe_append(item)
+        elif isinstance(payload, dict):
+            maybe_append(payload)
+    return parsed_rows
+
+
 def split_samples(
-    samples: list[str],
+    samples: list[Any],
     val_ratio: float,
     test_ratio: float,
     seed: int,
-) -> tuple[list[str], list[str], list[str]]:
+) -> tuple[list[Any], list[Any], list[Any]]:
     """Create deterministic train/validation/test split."""
     if len(samples) < 3:
         return samples, [], []
@@ -527,6 +666,311 @@ def split_samples(
     return train, val, test
 
 
+def build_distill_prompt(question: str) -> str:
+    """Build the strict prompt format used in distillation."""
+    return (
+        "Solve this math problem.\n"
+        "ALWAYS return exactly this format:\n"
+        "<reasoning>\n"
+        "- short, concrete steps (maximum 5 lines)\n"
+        "</reasoning>\n"
+        "<final>\n"
+        "- only the final number\n"
+        "</final>\n\n"
+        f"Problem: {question}\n"
+    )
+
+
+def extract_tag(text: str, tag: str) -> str | None:
+    """Extract a tag body from XML-like text."""
+    pattern = rf"<{tag}>\s*(.*?)\s*</{tag}>"
+    match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    value = match.group(1).strip()
+    return value or None
+
+
+def extract_last_number(text: str) -> str | None:
+    """Extract final number-like token from text."""
+    cleaned = text.replace(",", "")
+    matches = re.findall(r"-?\d+(?:\.\d+)?", cleaned)
+    if not matches:
+        return None
+    return matches[-1]
+
+
+def canonicalize_number(text: str) -> str | None:
+    """Normalize numeric strings to stable canonical form."""
+    cleaned = text.strip().replace(",", "")
+    if not cleaned:
+        return None
+    match = re.search(r"-?\d+(?:\.\d+)?", cleaned)
+    if not match:
+        return None
+    raw = match.group(0)
+    if "." not in raw:
+        return str(int(raw))
+    value = float(raw)
+    if math.isclose(value, round(value), rel_tol=0.0, abs_tol=1e-12):
+        return str(int(round(value)))
+    return str(value).rstrip("0").rstrip(".")
+
+
+def extract_pred_final(text: str) -> str | None:
+    """Extract predicted final answer from model generation."""
+    pred_final_raw = extract_tag(text, "final")
+    if pred_final_raw is None:
+        pred_final_raw = extract_last_number(text)
+    return canonicalize_number(pred_final_raw or "")
+
+
+def extract_gold_final(record: dict[str, Any]) -> str | None:
+    """Extract gold numeric final answer from a structured record."""
+    if "gold_final" in record and str(record["gold_final"]).strip():
+        return canonicalize_number(str(record["gold_final"]))
+    if "answer" in record:
+        answer = str(record["answer"])
+        if "####" in answer:
+            answer = answer.split("####")[-1]
+        return canonicalize_number(answer)
+    if "completion" in record and str(record["completion"]).strip():
+        completion = str(record["completion"])
+        completion_final = extract_tag(completion, "final") or extract_last_number(
+            completion
+        )
+        return canonicalize_number(completion_final or "")
+    return None
+
+
+def is_correct(pred_final: str | None, gold_final: str | None) -> bool:
+    """Check exact numeric correctness with float tolerance."""
+    if pred_final is None or gold_final is None:
+        return False
+    if pred_final == gold_final:
+        return True
+    try:
+        return math.isclose(
+            float(pred_final),
+            float(gold_final),
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+    except ValueError:
+        return False
+
+
+def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+    """Return the underlying module when wrapped in DDP."""
+    return model.module if isinstance(model, DDP) else model
+
+
+def load_structured_eval_examples(
+    *,
+    data_path: Path,
+    val_ratio: float,
+    test_ratio: float,
+    seed: int,
+    max_examples: int,
+) -> list[StructuredEvalExample]:
+    """Load a held-out structured subset for epoch-wise comparison."""
+    if data_path.suffix.lower() != ".jsonl":
+        return []
+
+    examples: list[StructuredEvalExample] = []
+    with data_path.open("r", encoding="utf-8") as handle:
+        for line_idx, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            if not isinstance(record, dict):
+                continue
+
+            gold_final = extract_gold_final(record)
+            if gold_final is None:
+                continue
+
+            prompt = str(record.get("prompt", "")).strip()
+            if not prompt:
+                question = str(record.get("question", "")).strip()
+                if question:
+                    prompt = build_distill_prompt(question)
+            if not prompt:
+                continue
+
+            examples.append(
+                StructuredEvalExample(
+                    dataset_index=int(record.get("dataset_index", line_idx - 1)),
+                    prompt=prompt,
+                    gold_final=gold_final,
+                )
+            )
+
+    if not examples:
+        return []
+
+    _, _, test_examples = split_samples(
+        samples=examples,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        seed=seed,
+    )
+    pool = test_examples if test_examples else examples
+
+    if max_examples > 0 and len(pool) > max_examples:
+        shuffled = pool.copy()
+        random.Random(seed + 17).shuffle(shuffled)
+        pool = shuffled[:max_examples]
+
+    return pool
+
+
+@torch.no_grad()
+def evaluate_generation_subset(
+    *,
+    model: torch.nn.Module,
+    tokenizer: AutoTokenizer,
+    examples: list[StructuredEvalExample],
+    device: torch.device,
+    batch_size: int,
+    max_input_length: int,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+) -> GenerationEvalResult:
+    """Evaluate exact-answer metrics on a fixed prompt subset."""
+    if not examples:
+        return GenerationEvalResult(
+            parsed=0,
+            correct=0,
+            accuracy=0.0,
+            parsed_rate=0.0,
+            predictions=[],
+            correct_flags=[],
+        )
+
+    eval_model = unwrap_model(model)
+    was_training = eval_model.training
+    eval_model.eval()
+
+    original_padding_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+
+    prompts = [example.prompt for example in examples]
+    outputs: list[str] = []
+    try:
+        for start in range(0, len(prompts), max(1, batch_size)):
+            batch_prompts = prompts[start : start + max(1, batch_size)]
+            encoded = tokenizer(
+                batch_prompts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=max_input_length,
+            )
+            encoded = {k: v.to(device) for k, v in encoded.items()}
+            generate_kwargs: dict[str, Any] = {
+                "max_new_tokens": max_new_tokens,
+                "pad_token_id": tokenizer.pad_token_id,
+                "eos_token_id": tokenizer.eos_token_id,
+                "use_cache": True,
+            }
+            if temperature > 0:
+                generate_kwargs["do_sample"] = True
+                generate_kwargs["temperature"] = temperature
+                generate_kwargs["top_p"] = top_p
+            else:
+                generate_kwargs["do_sample"] = False
+
+            generated = eval_model.generate(**encoded, **generate_kwargs)
+            prompt_tokens = encoded["input_ids"].shape[1]
+            generated_only = generated[:, prompt_tokens:]
+            outputs.extend(
+                tokenizer.batch_decode(generated_only, skip_special_tokens=True)
+            )
+
+        parsed = 0
+        correct = 0
+        correct_flags: list[bool] = []
+        predictions: list[str] = []
+
+        for output_text, example in zip(outputs, examples):
+            pred = extract_pred_final(output_text)
+            predictions.append(pred or "")
+            if pred is not None:
+                parsed += 1
+            ok = is_correct(pred, example.gold_final)
+            correct_flags.append(ok)
+            if ok:
+                correct += 1
+
+        evaluated = max(1, len(examples))
+        return GenerationEvalResult(
+            parsed=parsed,
+            correct=correct,
+            accuracy=correct / evaluated,
+            parsed_rate=parsed / evaluated,
+            predictions=predictions,
+            correct_flags=correct_flags,
+        )
+    finally:
+        tokenizer.padding_side = original_padding_side
+        if was_training:
+            eval_model.train()
+
+
+def write_epoch_compare_history(
+    path: Path,
+    history: list[dict[str, float | int]],
+) -> None:
+    """Persist epoch-wise original-vs-finetuned comparison metrics."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(history, indent=2), encoding="utf-8")
+
+
+def log_wandb_epoch_compare_charts(
+    run: Any,
+    history: list[dict[str, float | int]],
+    epoch: int,
+    global_step: int,
+) -> None:
+    """Log explicit line charts to W&B for original vs finetuned trends."""
+    if not history:
+        return
+    try:
+        import wandb
+    except ImportError:
+        return
+
+    xs = [int(item["epoch"]) for item in history]
+    original_acc = [float(item["original_accuracy"]) for item in history]
+    finetuned_acc = [float(item["finetuned_accuracy"]) for item in history]
+    original_parsed = [float(item["original_parsed_rate"]) for item in history]
+    finetuned_parsed = [float(item["finetuned_parsed_rate"]) for item in history]
+
+    run.log(
+        {
+            "epoch": epoch,
+            "train/global_step": global_step,
+            "compare/charts/accuracy": wandb.plot.line_series(
+                xs=xs,
+                ys=[original_acc, finetuned_acc],
+                keys=["original", "finetuned"],
+                title="Accuracy by Epoch (Original vs Finetuned)",
+                xname="epoch",
+            ),
+            "compare/charts/parsed_rate": wandb.plot.line_series(
+                xs=xs,
+                ys=[original_parsed, finetuned_parsed],
+                keys=["original", "finetuned"],
+                title="Parsed Rate by Epoch (Original vs Finetuned)",
+                xname="epoch",
+            ),
+        }
+    )
+
+
 def pack_causal_lm_blocks(
     samples: Iterable[str],
     tokenizer: AutoTokenizer,
@@ -545,7 +989,7 @@ def pack_causal_lm_blocks(
         token_stream.extend(token_ids)
         token_stream.append(eos_token_id)
 
-    block_len = seq_len + 1
+    block_len = seq_len
     usable_tokens = (len(token_stream) // block_len) * block_len
     if usable_tokens < block_len:
         raise ValueError(
@@ -555,8 +999,62 @@ def pack_causal_lm_blocks(
 
     all_tokens = torch.tensor(token_stream[:usable_tokens], dtype=torch.long)
     blocks = all_tokens.view(-1, block_len)
-    input_ids = blocks[:, :-1].contiguous()
-    labels = blocks[:, 1:].contiguous()
+    input_ids = blocks.contiguous()
+    # HF CausalLM applies internal shift for next-token prediction.
+    labels = blocks.clone().contiguous()
+    return input_ids, labels
+
+
+def pack_prompt_completion_blocks(
+    samples: Iterable[PromptCompletionSample],
+    tokenizer: AutoTokenizer,
+    seq_len: int,
+    response_only_loss: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pack prompt/completion pairs into blocks, with optional prompt masking."""
+    eos_token_id = tokenizer.eos_token_id
+    if eos_token_id is None:
+        raise ValueError("Tokenizer must define eos_token_id.")
+
+    token_stream: list[int] = []
+    label_stream: list[int] = []
+
+    for sample in samples:
+        if response_only_loss:
+            prompt_ids = tokenizer.encode(sample.prompt, add_special_tokens=False)
+            completion_ids = tokenizer.encode(
+                sample.completion,
+                add_special_tokens=False,
+            )
+            if not prompt_ids and not completion_ids:
+                continue
+            token_stream.extend(prompt_ids)
+            label_stream.extend([-100] * len(prompt_ids))
+            token_stream.extend(completion_ids)
+            label_stream.extend(completion_ids)
+        else:
+            text = sample.fallback_text or f"{sample.prompt}{sample.completion}"
+            token_ids = tokenizer.encode(text, add_special_tokens=False)
+            if not token_ids:
+                continue
+            token_stream.extend(token_ids)
+            label_stream.extend(token_ids)
+
+        token_stream.append(eos_token_id)
+        label_stream.append(eos_token_id)
+
+    block_len = seq_len
+    usable_tokens = (len(token_stream) // block_len) * block_len
+    if usable_tokens < block_len:
+        raise ValueError(
+            f"Not enough tokens to build one block of size {block_len}. "
+            f"Current token count: {len(token_stream)}."
+        )
+
+    all_tokens = torch.tensor(token_stream[:usable_tokens], dtype=torch.long)
+    all_labels = torch.tensor(label_stream[:usable_tokens], dtype=torch.long)
+    input_ids = all_tokens.view(-1, block_len).contiguous()
+    labels = all_labels.view(-1, block_len).contiguous()
     return input_ids, labels
 
 
@@ -567,11 +1065,13 @@ def cache_file_for_dataset(
     val_ratio: float,
     test_ratio: float,
     text_key: str,
+    response_only_loss: bool,
     output_dir: Path,
 ) -> Path:
     """Build deterministic cache path for tokenized dataset."""
     stat = data_path.stat()
     cache_payload = {
+        "packing_version": PACKING_VERSION,
         "path": str(data_path.resolve()),
         "size": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
@@ -580,6 +1080,7 @@ def cache_file_for_dataset(
         "val_ratio": val_ratio,
         "test_ratio": test_ratio,
         "text_key": text_key,
+        "response_only_loss": response_only_loss,
     }
     cache_key = hashlib.sha1(
         json.dumps(cache_payload, sort_keys=True).encode("utf-8")
@@ -604,51 +1105,119 @@ def build_or_load_tokenized_data(
         val_ratio=args.val_ratio,
         test_ratio=args.test_ratio,
         text_key=args.text_key,
+        response_only_loss=args.response_only_loss,
         output_dir=output_dir,
     )
 
     if not cache_path.exists() and is_rank0(ctx):
-        samples = read_text_samples(data_path=data_path, text_key=args.text_key)
-        train_samples, val_samples, test_samples = split_samples(
-            samples=samples,
-            val_ratio=args.val_ratio,
-            test_ratio=args.test_ratio,
-            seed=args.seed,
-        )
+        use_structured = False
+        structured_samples: list[PromptCompletionSample] = []
+        if args.response_only_loss:
+            structured_samples = read_prompt_completion_samples(
+                data_path=data_path,
+                text_key=args.text_key,
+            )
+            use_structured = len(structured_samples) > 0
 
-        train_inputs, train_labels = pack_causal_lm_blocks(
-            samples=train_samples,
-            tokenizer=tokenizer,
-            seq_len=args.seq_len,
-        )
+        if use_structured:
+            train_samples, val_samples, test_samples = split_samples(
+                samples=structured_samples,
+                val_ratio=args.val_ratio,
+                test_ratio=args.test_ratio,
+                seed=args.seed,
+            )
+            rank0_print(
+                ctx,
+                (
+                    "[data] using structured prompt/completion tokenization "
+                    f"(response_only_loss={args.response_only_loss})"
+                ),
+            )
+            train_inputs, train_labels = pack_prompt_completion_blocks(
+                samples=train_samples,
+                tokenizer=tokenizer,
+                seq_len=args.seq_len,
+                response_only_loss=args.response_only_loss,
+            )
 
-        def build_eval_split(
-            split_name: str,
-            split_samples: list[str],
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            if not split_samples:
-                return (
-                    torch.empty((0, args.seq_len), dtype=torch.long),
-                    torch.empty((0, args.seq_len), dtype=torch.long),
-                )
-            try:
-                return pack_causal_lm_blocks(
-                    samples=split_samples,
-                    tokenizer=tokenizer,
-                    seq_len=args.seq_len,
-                )
-            except ValueError:
+            def build_eval_split(
+                split_name: str,
+                split_samples: list[PromptCompletionSample],
+            ) -> tuple[torch.Tensor, torch.Tensor]:
+                if not split_samples:
+                    return (
+                        torch.empty((0, args.seq_len), dtype=torch.long),
+                        torch.empty((0, args.seq_len), dtype=torch.long),
+                    )
+                try:
+                    return pack_prompt_completion_blocks(
+                        samples=split_samples,
+                        tokenizer=tokenizer,
+                        seq_len=args.seq_len,
+                        response_only_loss=args.response_only_loss,
+                    )
+                except ValueError:
+                    rank0_print(
+                        ctx,
+                        f"[data] {split_name} split too small after tokenization; skipping.",
+                    )
+                    return (
+                        torch.empty((0, args.seq_len), dtype=torch.long),
+                        torch.empty((0, args.seq_len), dtype=torch.long),
+                    )
+
+            val_inputs, val_labels = build_eval_split("validation", val_samples)
+            test_inputs, test_labels = build_eval_split("test", test_samples)
+        else:
+            if args.response_only_loss:
                 rank0_print(
                     ctx,
-                    f"[data] {split_name} split too small after tokenization; skipping.",
+                    (
+                        "[data] prompt/completion fields not found; falling back to text "
+                        "tokenization without prompt masking."
+                    ),
                 )
-                return (
-                    torch.empty((0, args.seq_len), dtype=torch.long),
-                    torch.empty((0, args.seq_len), dtype=torch.long),
-                )
+            samples = read_text_samples(data_path=data_path, text_key=args.text_key)
+            train_samples, val_samples, test_samples = split_samples(
+                samples=samples,
+                val_ratio=args.val_ratio,
+                test_ratio=args.test_ratio,
+                seed=args.seed,
+            )
 
-        val_inputs, val_labels = build_eval_split("validation", val_samples)
-        test_inputs, test_labels = build_eval_split("test", test_samples)
+            train_inputs, train_labels = pack_causal_lm_blocks(
+                samples=train_samples,
+                tokenizer=tokenizer,
+                seq_len=args.seq_len,
+            )
+
+            def build_eval_split(
+                split_name: str,
+                split_samples: list[str],
+            ) -> tuple[torch.Tensor, torch.Tensor]:
+                if not split_samples:
+                    return (
+                        torch.empty((0, args.seq_len), dtype=torch.long),
+                        torch.empty((0, args.seq_len), dtype=torch.long),
+                    )
+                try:
+                    return pack_causal_lm_blocks(
+                        samples=split_samples,
+                        tokenizer=tokenizer,
+                        seq_len=args.seq_len,
+                    )
+                except ValueError:
+                    rank0_print(
+                        ctx,
+                        f"[data] {split_name} split too small after tokenization; skipping.",
+                    )
+                    return (
+                        torch.empty((0, args.seq_len), dtype=torch.long),
+                        torch.empty((0, args.seq_len), dtype=torch.long),
+                    )
+
+            val_inputs, val_labels = build_eval_split("validation", val_samples)
+            test_inputs, test_labels = build_eval_split("test", test_samples)
 
         payload = {
             "train_inputs": train_inputs,
@@ -828,6 +1397,10 @@ def main() -> int:
         raise ValueError("--val-ratio + --test-ratio must be < 0.95")
     if args.test_eval_every_epochs < 1:
         raise ValueError("--test-eval-every-epochs must be >= 1")
+    if args.epoch_compare_enabled and args.epoch_compare_num_examples < 1:
+        raise ValueError("--epoch-compare-num-examples must be >= 1")
+    if args.epoch_compare_enabled and args.epoch_compare_batch_size < 1:
+        raise ValueError("--epoch-compare-batch-size must be >= 1")
     ctx = setup_dist()
     wandb_run: Any | None = None
 
@@ -1031,6 +1604,32 @@ def main() -> int:
             target_tokens=target_tokens,
         )
 
+        epoch_compare_examples: list[StructuredEvalExample] = []
+        epoch_compare_history: list[dict[str, float | int]] = []
+        original_compare_result: GenerationEvalResult | None = None
+        original_compare_flags: list[bool] = []
+        if args.epoch_compare_enabled and is_rank0(ctx):
+            epoch_compare_examples = load_structured_eval_examples(
+                data_path=Path(args.data_path),
+                val_ratio=args.val_ratio,
+                test_ratio=args.test_ratio,
+                seed=args.seed,
+                max_examples=args.epoch_compare_num_examples,
+            )
+            if epoch_compare_examples:
+                rank0_print(
+                    ctx,
+                    (
+                        "[epoch-compare] loaded structured eval subset "
+                        f"(examples={len(epoch_compare_examples)})"
+                    ),
+                )
+            else:
+                rank0_print(
+                    ctx,
+                    "[epoch-compare] no structured examples found; comparison disabled.",
+                )
+
         base_test_loss = float("nan")
         base_test_ppl = float("nan")
         if args.compare_base_on_test and len(test_dataset) > 0:
@@ -1064,6 +1663,57 @@ def main() -> int:
             del base_eval_model
             if ctx.device.type == "cuda":
                 torch.cuda.empty_cache()
+
+        if args.epoch_compare_enabled and epoch_compare_examples:
+            if is_rank0(ctx):
+                try:
+                    original_compare_result = evaluate_generation_subset(
+                        model=model,
+                        tokenizer=tokenizer,
+                        examples=epoch_compare_examples,
+                        device=ctx.device,
+                        batch_size=args.epoch_compare_batch_size,
+                        max_input_length=args.epoch_compare_max_input_length,
+                        max_new_tokens=args.epoch_compare_max_new_tokens,
+                        temperature=args.epoch_compare_temperature,
+                        top_p=args.epoch_compare_top_p,
+                    )
+                    original_compare_flags = original_compare_result.correct_flags
+                    rank0_print(
+                        ctx,
+                        (
+                            "[epoch-compare] original "
+                            f"acc={original_compare_result.accuracy:.4f} "
+                            f"parsed={original_compare_result.parsed_rate:.4f}"
+                        ),
+                    )
+                    if wandb_run is not None:
+                        wandb_run.log(
+                            {
+                                "epoch": 0,
+                                "train/global_step": 0,
+                                "compare/accuracy_original": original_compare_result.accuracy,
+                                "compare/parsed_rate_original": (
+                                    original_compare_result.parsed_rate
+                                ),
+                                "compare/accuracy_finetuned": original_compare_result.accuracy,
+                                "compare/parsed_rate_finetuned": (
+                                    original_compare_result.parsed_rate
+                                ),
+                                "compare/delta_accuracy_vs_original": 0.0,
+                                "compare/improved_count_vs_original": 0,
+                                "compare/regressed_count_vs_original": 0,
+                                "compare/evaluated_examples": len(epoch_compare_examples),
+                            }
+                        )
+                except Exception as exc:
+                    rank0_print(
+                        ctx,
+                        f"[epoch-compare] disabled (baseline generation failed): {exc}",
+                    )
+                    epoch_compare_examples = []
+                    original_compare_result = None
+                    original_compare_flags = []
 
         global_step = 0
         best_val_loss = float("inf")
@@ -1314,6 +1964,12 @@ def main() -> int:
                                 "test/delta_loss_vs_base": delta_loss,
                                 "test/delta_ppl_vs_base": delta_ppl,
                                 "test/improvement_pct_vs_base": improvement_pct,
+                                "compare/loss_original": base_test_loss,
+                                "compare/loss_finetuned": distilled_test_loss,
+                                "compare/loss_delta_vs_original": delta_loss,
+                                "compare/loss_improvement_pct_vs_original": (
+                                    improvement_pct
+                                ),
                             }
                         )
                         rank0_print(
@@ -1335,6 +1991,114 @@ def main() -> int:
                         )
                     if wandb_run is not None:
                         wandb_run.log(log_payload)
+
+            should_eval_compare_now = (
+                args.epoch_compare_enabled
+                and len(epoch_compare_examples) > 0
+                and original_compare_result is not None
+                and (
+                    (epoch + 1) % args.test_eval_every_epochs == 0
+                    or (epoch + 1) == args.epochs
+                    or (args.max_steps > 0 and global_step >= args.max_steps)
+                )
+            )
+            if should_eval_compare_now:
+                if is_rank0(ctx):
+                    try:
+                        finetuned_compare_result = evaluate_generation_subset(
+                            model=model,
+                            tokenizer=tokenizer,
+                            examples=epoch_compare_examples,
+                            device=ctx.device,
+                            batch_size=args.epoch_compare_batch_size,
+                            max_input_length=args.epoch_compare_max_input_length,
+                            max_new_tokens=args.epoch_compare_max_new_tokens,
+                            temperature=args.epoch_compare_temperature,
+                            top_p=args.epoch_compare_top_p,
+                        )
+                    except Exception as exc:
+                        rank0_print(
+                            ctx,
+                            f"[epoch-compare] disabled (epoch eval failed): {exc}",
+                        )
+                        epoch_compare_examples = []
+                        original_compare_result = None
+                        original_compare_flags = []
+                    else:
+                        improved = 0
+                        regressed = 0
+                        for base_ok, finetuned_ok in zip(
+                            original_compare_flags,
+                            finetuned_compare_result.correct_flags,
+                        ):
+                            if (not base_ok) and finetuned_ok:
+                                improved += 1
+                            elif base_ok and (not finetuned_ok):
+                                regressed += 1
+
+                        delta_accuracy = (
+                            finetuned_compare_result.accuracy
+                            - original_compare_result.accuracy
+                        )
+                        compare_payload: dict[str, float | int] = {
+                            "epoch": epoch + 1,
+                            "train/global_step": global_step,
+                            "compare/evaluated_examples": len(epoch_compare_examples),
+                            "compare/accuracy_original": original_compare_result.accuracy,
+                            "compare/parsed_rate_original": (
+                                original_compare_result.parsed_rate
+                            ),
+                            "compare/accuracy_finetuned": (
+                                finetuned_compare_result.accuracy
+                            ),
+                            "compare/parsed_rate_finetuned": (
+                                finetuned_compare_result.parsed_rate
+                            ),
+                            "compare/delta_accuracy_vs_original": delta_accuracy,
+                            "compare/improved_count_vs_original": improved,
+                            "compare/regressed_count_vs_original": regressed,
+                        }
+                        epoch_compare_history.append(
+                            {
+                                "epoch": epoch + 1,
+                                "evaluated_examples": len(epoch_compare_examples),
+                                "original_accuracy": original_compare_result.accuracy,
+                                "finetuned_accuracy": (
+                                    finetuned_compare_result.accuracy
+                                ),
+                                "original_parsed_rate": (
+                                    original_compare_result.parsed_rate
+                                ),
+                                "finetuned_parsed_rate": (
+                                    finetuned_compare_result.parsed_rate
+                                ),
+                                "delta_accuracy_vs_original": delta_accuracy,
+                                "improved_count_vs_original": improved,
+                                "regressed_count_vs_original": regressed,
+                            }
+                        )
+                        write_epoch_compare_history(
+                            output_dir / "compare_by_epoch.json",
+                            epoch_compare_history,
+                        )
+                        rank0_print(
+                            ctx,
+                            (
+                                f"[epoch-compare {epoch + 1}] "
+                                f"orig_acc={original_compare_result.accuracy:.4f} "
+                                f"ft_acc={finetuned_compare_result.accuracy:.4f} "
+                                f"delta={delta_accuracy:+.4f} "
+                                f"improved={improved} regressed={regressed}"
+                            ),
+                        )
+                        if wandb_run is not None:
+                            wandb_run.log(compare_payload)
+                            log_wandb_epoch_compare_charts(
+                                run=wandb_run,
+                                history=epoch_compare_history,
+                                epoch=epoch + 1,
+                                global_step=global_step,
+                            )
 
             save_checkpoint(
                 path=output_dir / "checkpoints" / "last.pt",
@@ -1442,6 +2206,32 @@ def main() -> int:
             "early_stopped": early_stopped,
             "stop_reason": stop_reason,
         }
+        if epoch_compare_history:
+            latest_compare = epoch_compare_history[-1]
+            final_metrics.update(
+                {
+                    "compare_evaluated_examples": int(
+                        latest_compare.get(
+                            "evaluated_examples", len(epoch_compare_examples)
+                        )
+                    ),
+                    "compare_original_accuracy": float(
+                        latest_compare["original_accuracy"]
+                    ),
+                    "compare_finetuned_accuracy": float(
+                        latest_compare["finetuned_accuracy"]
+                    ),
+                    "compare_delta_accuracy_vs_original": float(
+                        latest_compare["delta_accuracy_vs_original"]
+                    ),
+                    "compare_improved_count_vs_original": int(
+                        latest_compare["improved_count_vs_original"]
+                    ),
+                    "compare_regressed_count_vs_original": int(
+                        latest_compare["regressed_count_vs_original"]
+                    ),
+                }
+            )
 
         if is_rank0(ctx):
             wrapped_model.save_pretrained(output_dir / "model_final")
@@ -1460,8 +2250,21 @@ def main() -> int:
                             "test/delta_loss_vs_base": final_delta_loss_vs_base,
                             "test/delta_ppl_vs_base": final_delta_ppl_vs_base,
                             "test/improvement_pct_vs_base": final_improvement_pct_vs_base,
+                            "compare/loss_original": base_test_loss,
+                            "compare/loss_finetuned": test_loss,
+                            "compare/loss_delta_vs_original": final_delta_loss_vs_base,
+                            "compare/loss_improvement_pct_vs_original": (
+                                final_improvement_pct_vs_base
+                            ),
                             "train/global_step": global_step,
                         }
+                    )
+                if epoch_compare_history:
+                    log_wandb_epoch_compare_charts(
+                        run=wandb_run,
+                        history=epoch_compare_history,
+                        epoch=last_epoch,
+                        global_step=global_step,
                     )
                 wandb_run.finish()
 

@@ -87,6 +87,12 @@ def parse_args() -> argparse.Namespace:
         help="Apply each tokenizer chat template when available.",
     )
     parser.add_argument(
+        "--prepend-system-prompt",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Prepend SYSTEM_PROMPT when chat template is disabled.",
+    )
+    parser.add_argument(
         "--show-examples",
         type=int,
         default=5,
@@ -166,6 +172,7 @@ def maybe_apply_chat_template(
     tokenizer: AutoTokenizer,
     prompt: str,
     use_chat_template: bool,
+    prepend_system_prompt: bool,
 ) -> str:
     """Format prompt with chat template when available."""
     if use_chat_template and tokenizer.chat_template:
@@ -178,7 +185,9 @@ def maybe_apply_chat_template(
             tokenize=False,
             add_generation_prompt=True,
         )
-    return f"{SYSTEM_PROMPT}\n\n{prompt}"
+    if prepend_system_prompt:
+        return f"{SYSTEM_PROMPT}\n\n{prompt}"
+    return prompt
 
 
 def extract_tag(text: str, tag: str) -> str | None:
@@ -531,11 +540,21 @@ def main() -> int:
     answers = dataset[start:end]["answer"]
     prompts = [build_prompt(question) for question in questions]
     base_inputs = [
-        maybe_apply_chat_template(base_tokenizer, prompt, args.use_chat_template)
+        maybe_apply_chat_template(
+            base_tokenizer,
+            prompt,
+            args.use_chat_template,
+            args.prepend_system_prompt,
+        )
         for prompt in prompts
     ]
     finetuned_inputs = [
-        maybe_apply_chat_template(finetuned_tokenizer, prompt, args.use_chat_template)
+        maybe_apply_chat_template(
+            finetuned_tokenizer,
+            prompt,
+            args.use_chat_template,
+            args.prepend_system_prompt,
+        )
         for prompt in prompts
     ]
 
