@@ -70,16 +70,30 @@ def append_csv(path: Path, frame: pd.DataFrame) -> None:
     """Append a dataframe to csv creating header on first write.
 
     Uses a lock file to allow safe concurrent appends from multiple processes.
+    The lock file is opened in append mode (not "w") to avoid truncation races,
+    and the data file is explicitly flushed/synced before the lock is released.
     """
     import fcntl
 
     ensure_dir(path.parent)
     lock_path = path.with_suffix(path.suffix + ".lock")
-    with open(lock_path, "w") as lock_fh:
+    with open(lock_path, "a") as lock_fh:
         fcntl.flock(lock_fh, fcntl.LOCK_EX)
         try:
-            exists = path.exists()
-            frame.to_csv(path, mode="a", header=not exists, index=False)
+            write_header = not path.exists() or path.stat().st_size == 0
+            # Ensure previous content ends with newline before appending.
+            if not write_header:
+                with open(path, "rb") as check_fh:
+                    check_fh.seek(0, 2)  # EOF
+                    if check_fh.tell() > 0:
+                        check_fh.seek(-1, 2)
+                        if check_fh.read(1) != b"\n":
+                            with open(path, "a") as fix_fh:
+                                fix_fh.write("\n")
+            with open(path, "a") as data_fh:
+                frame.to_csv(data_fh, header=write_header, index=False)
+                data_fh.flush()
+                os.fsync(data_fh.fileno())
         finally:
             fcntl.flock(lock_fh, fcntl.LOCK_UN)
 

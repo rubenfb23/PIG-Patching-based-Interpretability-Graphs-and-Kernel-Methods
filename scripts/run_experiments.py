@@ -270,7 +270,7 @@ def main() -> None:
     completed_run_ids: set[str] = set()
     if summary_path.exists():
         if args.resume:
-            existing = pd.read_csv(summary_path)
+            existing = pd.read_csv(summary_path, on_bad_lines="warn")
             if "run_id" in existing.columns:
                 completed_run_ids = set(existing["run_id"].astype(str).tolist())
         else:
@@ -360,7 +360,7 @@ def main() -> None:
     if not summary_path.exists():
         raise SystemExit("No summary produced. All runs failed?")
 
-    summary = pd.read_csv(summary_path)
+    summary = pd.read_csv(summary_path, on_bad_lines="warn")
     save_csv(tables_dir() / "summary.csv", summary)
 
     # Aggregate per-layer NC across runs.
