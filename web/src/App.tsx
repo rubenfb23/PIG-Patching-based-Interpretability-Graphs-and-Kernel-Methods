@@ -20,6 +20,35 @@ export default function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null);
   const [isolateLocalCircuit, setIsolateLocalCircuit] = useState(true);
   const clientRef = useRef<ViewerClient | null>(null);
+  const selectedNodeIdRef = useRef<number | null>(null);
+  const selectedNodeSignatureRef = useRef<{
+    layer: number;
+    token: number;
+    type: string;
+    head: number | null;
+  } | null>(null);
+
+  useEffect(() => {
+    selectedNodeIdRef.current = selectedNodeId;
+  }, [selectedNodeId]);
+
+  useEffect(() => {
+    if (!graph || selectedNodeId === null) {
+      selectedNodeSignatureRef.current = null;
+      return;
+    }
+    const selectedNode = graph.nodes.find((node) => node.id === selectedNodeId);
+    if (!selectedNode) {
+      selectedNodeSignatureRef.current = null;
+      return;
+    }
+    selectedNodeSignatureRef.current = {
+      layer: selectedNode.layer,
+      token: selectedNode.token,
+      type: selectedNode.type,
+      head: selectedNode.head,
+    };
+  }, [graph, selectedNodeId]);
 
   useEffect(() => {
     const client = new ViewerClient(DEFAULT_WS_URL, (message: ViewerMessage) => {
@@ -32,8 +61,34 @@ export default function App() {
       }
 
       if (message.type === "graph_update") {
-        setGraph(message.payload);
-        setSelectedNodeId(null);
+        const nextGraph = message.payload;
+        setGraph(nextGraph);
+
+        const currentSelectedId = selectedNodeIdRef.current;
+        if (currentSelectedId === null) {
+          return;
+        }
+
+        const hasSameId = nextGraph.nodes.some((node) => node.id === currentSelectedId);
+        if (hasSameId) {
+          setSelectedNodeId(currentSelectedId);
+          return;
+        }
+
+        const signature = selectedNodeSignatureRef.current;
+        if (!signature) {
+          setSelectedNodeId(null);
+          return;
+        }
+
+        const remappedNode = nextGraph.nodes.find(
+          (node) =>
+            node.layer === signature.layer &&
+            node.token === signature.token &&
+            node.type === signature.type &&
+            node.head === signature.head,
+        );
+        setSelectedNodeId(remappedNode?.id ?? null);
         return;
       }
 
