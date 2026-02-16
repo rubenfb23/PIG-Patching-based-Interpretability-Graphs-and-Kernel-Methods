@@ -213,3 +213,10 @@ wandb/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Local model binaries (too large for GitHub)
+outputs/**/model.safetensors
+
+node_modules/
+web/dist/
+web/tsconfig.tsbuildinfo

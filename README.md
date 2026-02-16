@@ -70,6 +70,71 @@ If you want to continue even if a stage fails:
 pig pipeline --continue-on-error
 ```
 
+### Local 4D Graph Viewer (Web)
+
+You can now run a local interactive viewer backend over WebSocket and connect a
+TypeScript 3D client.
+
+1. Generate cache files (toy model by default):
+
+```bash
+uv run pig viewer-cache --model-name toy_transformer --cache-dir .cache/patch_effects
+```
+
+2. Start backend from repo root:
+
+```bash
+uv run pig viewer --cache-dir .cache/patch_effects --host 127.0.0.1 --port 8765
+```
+
+3. In another terminal, start frontend:
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+4. Open `http://127.0.0.1:5173` and explore the graph by slice/layer/token and
+edge-weight threshold.
+
+Notes:
+
+- The backend expects JSON tensors produced by `PatchEffectCache` in `--cache-dir`.
+- The viewer returns sparse top-k graphs and supports interactive filtering via
+    WebSocket (`filter_update` -> `graph_update`).
+
+#### Deploy / run modes
+
+Development mode:
+
+```bash
+# terminal 1 (backend)
+uv run pig viewer --cache-dir .cache/patch_effects --host 127.0.0.1 --port 8765
+
+# terminal 2 (frontend)
+cd web
+npm run dev
+```
+
+Production-like local mode:
+
+```bash
+cd web
+npm run build
+npm run preview -- --host 127.0.0.1 --port 4173
+```
+
+Then open `http://127.0.0.1:4173` while backend is still running on `8765`.
+
+#### Troubleshooting
+
+- `address already in use` on port `8765` means an older backend process is still running.
+    - Check: `ss -ltnp '( sport = :8765 )'`
+    - Stop process: `kill <PID>`
+- If cache generation options changed (e.g. `--node-types`), regenerate cache before launching backend.
+- If frontend changes are not visible, hard refresh browser (`Ctrl+Shift+R`).
+
 ## GPT-2 Teacher Distillation (GSM8K)
 
 Install extra packages for this workflow:

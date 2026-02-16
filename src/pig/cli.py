@@ -210,6 +210,76 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    viewer_parser = subparsers.add_parser(
+        "viewer",
+        help="Start local websocket backend for interactive graph viewer",
+    )
+    viewer_parser.add_argument(
+        "--cache-dir",
+        default=".cache/patch_effects",
+        help="Directory with cached patch-effect JSON files",
+    )
+    viewer_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host interface for websocket server",
+    )
+    viewer_parser.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        help="Port for websocket server",
+    )
+    viewer_parser.add_argument(
+        "--top-k",
+        type=int,
+        default=5,
+        help="Top-k edges per node when building graphs",
+    )
+    viewer_parser.add_argument(
+        "--max-edges",
+        type=int,
+        default=3000,
+        help="Default edge cap per response",
+    )
+
+    cache_parser = subparsers.add_parser(
+        "viewer-cache",
+        help="Generate patch-effect cache files for local graph viewer",
+    )
+    cache_parser.add_argument(
+        "--model-name",
+        default="toy_transformer",
+        help="Model identifier to use for cache generation",
+    )
+    cache_parser.add_argument(
+        "--cache-dir",
+        default=".cache/patch_effects",
+        help="Output directory for patch-effect cache JSON files",
+    )
+    cache_parser.add_argument(
+        "--num-examples",
+        type=int,
+        default=16,
+        help="Number of examples per corruption slice",
+    )
+    cache_parser.add_argument(
+        "--corruptions",
+        default="name_swap,abba",
+        help="Comma-separated corruption names",
+    )
+    cache_parser.add_argument(
+        "--node-types",
+        default="res",
+        help="Comma-separated node types (res,mlp,att)",
+    )
+    cache_parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Base random seed",
+    )
+
     return parser
 
 
@@ -223,6 +293,58 @@ def main() -> None:
             stop_on_failure=not args.continue_on_error,
             graph_builder=args.graph_builder,
         )
+        raise SystemExit(code)
+
+    if args.command == "viewer":
+        viewer_module = "pig.web.api"
+        viewer_command = [
+            sys.executable,
+            "-m",
+            viewer_module,
+            "--cache-dir",
+            args.cache_dir,
+            "--host",
+            args.host,
+            "--port",
+            str(args.port),
+            "--top-k",
+            str(args.top_k),
+            "--max-edges",
+            str(args.max_edges),
+        ]
+        code = subprocess.run(
+            viewer_command,
+            cwd=str(_repo_root()),
+            env={**os.environ},
+            check=False,
+        ).returncode
+        raise SystemExit(code)
+
+    if args.command == "viewer-cache":
+        cache_module = "pig.web.cache_builder"
+        cache_command = [
+            sys.executable,
+            "-m",
+            cache_module,
+            "--model-name",
+            args.model_name,
+            "--cache-dir",
+            args.cache_dir,
+            "--num-examples",
+            str(args.num_examples),
+            "--corruptions",
+            args.corruptions,
+            "--node-types",
+            args.node_types,
+            "--seed",
+            str(args.seed),
+        ]
+        code = subprocess.run(
+            cache_command,
+            cwd=str(_repo_root()),
+            env={**os.environ},
+            check=False,
+        ).returncode
         raise SystemExit(code)
 
     parser.print_help()
