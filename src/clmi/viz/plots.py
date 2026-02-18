@@ -104,13 +104,110 @@ def plot_kernel_matrix(
     output_path: Path,
     title: str,
 ) -> None:
-    """Visualize task-task kernel matrix."""
+    """Visualize task-task kernel matrix.
+
+    Large matrices (>20) are reordered hierarchically
+    (overlap → ft_mode → mitigation → pair → seed), use off-diagonal
+    percentile scaling, and show group boundaries with centered labels.
+    """
     ensure_dir(output_path.parent)
 
-    fig, ax = plt.subplots(figsize=(6, 5.5))
-    im = ax.imshow(matrix, cmap="magma", aspect="auto")
-    ax.set_xticks(np.arange(len(labels)), labels=labels, rotation=45, ha="right")
-    ax.set_yticks(np.arange(len(labels)), labels=labels)
+    n = matrix.shape[0]
+    large = n > 20
+
+    if large:
+        import re as _re
+
+        def _parse_label(lbl: str) -> tuple[float, str, str, int, int]:
+            """Return (overlap, ft_mode, mitigation, pair, seed)."""
+            m = _re.match(
+                r"pair_o(\d+p\d+)_s(\d+)_p(\d+)_(\w+?)_(none|freeze_nc|anchor_reg)",
+                lbl,
+            )
+            if m:
+                ov = float(m.group(1).replace("p", "."))
+                seed = int(m.group(2))
+                pair = int(m.group(3))
+                ft = m.group(4)
+                mit = m.group(5)
+                return (ov, ft, mit, pair, seed)
+            return (0.0, "", "", 0, 0)
+
+        order = sorted(range(n), key=lambda i: _parse_label(labels[i]))
+        matrix = matrix[np.ix_(order, order)]
+        labels = [labels[i] for i in order]
+
+        # Primary groups: overlap.
+        ov_groups: list[tuple[str, int, int]] = []
+        prev_ov = None
+        for i, lbl in enumerate(labels):
+            ov = _parse_label(lbl)[0]
+            key = f"ov={ov:.2f}"
+            if key != prev_ov:
+                if ov_groups:
+                    ov_groups[-1] = (ov_groups[-1][0], ov_groups[-1][1], i)
+                ov_groups.append((key, i, n))
+                prev_ov = key
+        if ov_groups:
+            ov_groups[-1] = (ov_groups[-1][0], ov_groups[-1][1], n)
+
+        # Secondary groups: ft_mode within each overlap.
+        ft_groups: list[tuple[str, int, int]] = []
+        prev_ft = None
+        for i, lbl in enumerate(labels):
+            parsed = _parse_label(lbl)
+            key = f"{parsed[0]:.2f}_{parsed[1]}"
+            if key != prev_ft:
+                if ft_groups:
+                    ft_groups[-1] = (ft_groups[-1][0], ft_groups[-1][1], i)
+                ft_groups.append((parsed[1], i, n))
+                prev_ft = key
+        if ft_groups:
+            ft_groups[-1] = (ft_groups[-1][0], ft_groups[-1][1], n)
+
+        off_diag = matrix[~np.eye(n, dtype=bool)]
+        vmin = float(np.percentile(off_diag, 1))
+        vmax = float(np.percentile(off_diag, 99))
+    else:
+        vmin, vmax = None, None
+        ov_groups = []
+        ft_groups = []
+
+    figsize = (8, 7) if large else (6, 5.5)
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.imshow(matrix, cmap="magma", aspect="auto", vmin=vmin, vmax=vmax)
+
+    if large and ov_groups:
+        # Primary overlap ticks on the axes.
+        tick_pos = [(s + e) / 2 for _, s, e in ov_groups]
+        tick_labels = [name for name, _, _ in ov_groups]
+        ax.set_xticks(tick_pos, labels=tick_labels, fontsize=9)
+        ax.set_yticks(tick_pos, labels=tick_labels, fontsize=9)
+
+        # Thick white lines between overlap groups.
+        for _, _, end in ov_groups[:-1]:
+            ax.axhline(end - 0.5, color="white", linewidth=1.2)
+            ax.axvline(end - 0.5, color="white", linewidth=1.2)
+
+        # Thin grey lines between ft_mode sub-groups.
+        ov_boundaries = {end for _, _, end in ov_groups[:-1]}
+        for _, _, end in ft_groups[:-1]:
+            if end not in ov_boundaries:
+                ax.axhline(end - 0.5, color="white", linewidth=0.4, alpha=0.5)
+                ax.axvline(end - 0.5, color="white", linewidth=0.4, alpha=0.5)
+
+        # Secondary ft_mode labels on the right axis.
+        ft_pos = [(s + e) / 2 for _, s, e in ft_groups]
+        ft_labels = [name for name, _, _ in ft_groups]
+        ax2 = ax.secondary_yaxis("right")
+        ax2.set_yticks(ft_pos)
+        ax2.set_yticklabels(ft_labels, fontsize=6, alpha=0.7)
+        ax2.tick_params(length=2)
+
+    elif not large:
+        ax.set_xticks(np.arange(len(labels)), labels=labels, rotation=45, ha="right")
+        ax.set_yticks(np.arange(len(labels)), labels=labels)
+
     ax.set_title(title)
     fig.colorbar(im, ax=ax)
     fig.tight_layout()
