@@ -212,7 +212,9 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-#Manual
+# Results
 results/cache/
 results/checkpoints/
-results
+results/*.log
+results/runs/
+results/tables/
