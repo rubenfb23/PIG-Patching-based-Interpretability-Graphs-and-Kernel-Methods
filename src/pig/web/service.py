@@ -50,10 +50,22 @@ class GraphViewerService:
         )
         self._graphs = self._builder.build_all(dataset)
         self._slice_ids = sorted(_slice_to_id(label) for label in self._graphs)
+        self._token_labels_by_slice = self._build_token_labels()
 
     @property
     def slice_ids(self) -> list[str]:
         return self._slice_ids
+
+    def _build_token_labels(self) -> dict[str, list[str]]:
+        """Build token label lists keyed by slice_id from the first tensor per slice."""
+        labels: dict[str, list[str]] = {}
+        for slice_label in self._graphs:
+            slice_id = _slice_to_id(slice_label)
+            tensors = self._dataset.get_by_slice(slice_label)
+            if tensors and tensors[0].token_labels:
+                graph = self._graphs[slice_label]
+                labels[slice_id] = tensors[0].token_labels[: graph.num_tokens]
+        return labels
 
     def initial_payload(self) -> dict:
         first_slice = self._slice_ids[0]
@@ -79,12 +91,14 @@ class GraphViewerService:
         if graph is None:
             raise ValueError(f"Unknown slice '{view_filter.slice_id}'")
 
-        return self._filter_graph(graph, view_filter)
+        token_labels = self._token_labels_by_slice.get(view_filter.slice_id, [])
+        return self._filter_graph(graph, view_filter, token_labels)
 
     def _filter_graph(
         self,
         graph: PatchInfluenceGraph,
         view_filter: ViewFilter,
+        token_labels: list[str],
     ) -> dict:
         layer_min = 0 if view_filter.layer_min is None else view_filter.layer_min
         layer_max = (
@@ -144,6 +158,7 @@ class GraphViewerService:
             "slice": view_filter.slice_id,
             "num_layers": graph.num_layers,
             "num_tokens": graph.num_tokens,
+            "token_labels": token_labels,
             "nodes": nodes,
             "edges": edges,
             "stats": {

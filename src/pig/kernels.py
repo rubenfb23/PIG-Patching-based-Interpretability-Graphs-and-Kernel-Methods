@@ -136,9 +136,7 @@ class ClassicalKernelClassifier:
         # Encode labels if needed
         if isinstance(y, list) and isinstance(y[0], SliceLabel):
             self._label_encoder = LabelEncoder()
-            y_encoded = self._label_encoder.fit_transform(
-                [str(label) for label in y]
-            )
+            y_encoded = self._label_encoder.fit_transform([str(label) for label in y])
         else:
             y_encoded = np.array(y)
 
@@ -211,9 +209,7 @@ class ClassicalKernelClassifier:
         if isinstance(y, list) and isinstance(y[0], SliceLabel):
             if self._label_encoder is None:
                 raise RuntimeError("Classifier not fitted")
-            y_encoded = self._label_encoder.transform(
-                [str(label) for label in y]
-            )
+            y_encoded = self._label_encoder.transform([str(label) for label in y])
         else:
             y_encoded = np.array(y)
 
@@ -254,9 +250,7 @@ class ClassicalKernelClassifier:
         # Encode labels
         if isinstance(y, list) and isinstance(y[0], SliceLabel):
             label_encoder = LabelEncoder()
-            y_encoded = label_encoder.fit_transform(
-                [str(label) for label in y]
-            )
+            y_encoded = label_encoder.fit_transform([str(label) for label in y])
         else:
             y_encoded = np.array(y)
 
@@ -302,9 +296,7 @@ class ClassicalKernelClassifier:
         # Encode labels
         if isinstance(y, list) and isinstance(y[0], SliceLabel):
             label_encoder = LabelEncoder()
-            y_encoded = label_encoder.fit_transform(
-                [str(label) for label in y]
-            )
+            y_encoded = label_encoder.fit_transform([str(label) for label in y])
         else:
             y_encoded = np.array(y)
 
@@ -323,6 +315,7 @@ class ClassicalKernelClassifier:
             y_encoded,
             train_sizes=train_sizes,
             cv=cv,
+            shuffle=True,
             random_state=self.random_state,
         )
 
