@@ -1,620 +1,229 @@
-# Patching-based Interpretability Graphs (PIG)
+# CLMI (src/clmi): ¿qué experimentos son y cómo se hacen?
 
-A Python framework for mechanistic interpretability that:
+Este módulo (CLMI) es una **suite de experimentos** sobre **aprendizaje continuo (continual learning) en GPT‑2** + **interpretabilidad mecánica**, usando tareas sintéticas controladas.
 
-1. Generates interventional datasets via **activation patching**
-2. Summarizes patch effects as **sparse directed graphs** (one graph per "slice" of prompts/corruptions)
-3. Compares slices using **kernel methods** (classical and quantum) to induce a similarity geometry over circuits
+La idea es construir un escenario donde:
+- el modelo aprende una tarea **A**,
+- luego aprende una tarea **B** que **interfiere** con A,
+- y luego vuelve a entrenar en **A** (fase A2),
 
-## Installation
+para medir **olvido (forgetting)**, **histeresis**, y relacionarlo con medidas de **no conmutatividad** (NC) en “subespacios causales” del modelo.
+
+---
+
+## 1) Tarea sintética A/B (diccionario con solapamiento controlado)
+Archivo clave: `src/clmi/data/synth_tasks.py`
+
+Se construyen dos tareas de tipo “diccionario”:
+
+- Cada ejemplo es un prompt tipo:
+  
+  ```
+  Q: <clave>
+  A:
+  ```
+  
+  y el objetivo es que el modelo prediga un **valor** asociado a esa clave.
+
+- La función `generate_task_pair(...)` crea:
+  - una tarea **A** con `n_keys` claves y valores,
+  - una tarea **B** con `n_keys` claves y valores,
+  - un parámetro `overlap ∈ [0,1]` que decide cuántas claves se comparten.
+
+**Punto importante:**
+- Para las claves compartidas, se fuerza un **conflicto**: la misma clave tiene **valor distinto** en A y en B.
+- Así, aprender B tiende a **romper** el desempeño en A (interferencia / catastrophic forgetting).
+
+---
+
+## 2) Protocolo de aprendizaje continuo (A → B → A2)
+Script principal: `scripts/run_pair.py`
+
+Para cada par A/B:
+
+1. **M0 (inicio):** se carga el modelo base (por defecto GPT‑2).
+2. **Fase A:** fine‑tuning en tarea A → checkpoint **MA**.
+3. **Fase B:** fine‑tuning en tarea B (mientras se monitorea caída en A) → checkpoint **MAB**.
+4. **Fase A2:** se re‑entrena en A para medir recuperación (histeresis) → checkpoint **MABA**.
+
+Dos variantes del orden:
+- `--protocol ABA` (por defecto)
+- `--protocol BAB` (invirtiendo el orden para tests de simetría)
+
+Dos modos de fine‑tuning:
+- `--ft-mode full`: entrena parámetros normales del modelo.
+- `--ft-mode lora`: entrena adaptadores LoRA (requiere `peft`).
+
+---
+
+## 3) Qué métricas se reportan (lo “medible” del experimento)
+
+### (a) Accuracy por fase
+Se mide la exactitud (exact match) de A y B en distintos checkpoints:
+- `AccA_MA`, `AccA_MAB`, `AccA_MABA`
+- `AccB_MAB`, `AccB_MABA`
+
+### (b) Forgetting
+Archivo: `src/clmi/metrics/forgetting.py`
+
+Se define como:
+- `forgettingA = AccA_MA − AccA_MAB`
+
+(es decir: cuánto cae A después de aprender B).
+
+### (c) Histeresis (remanencia, coercitividad, área)
+También en `src/clmi/metrics/forgetting.py`.
+
+Se mira la curva de recuperación cuando se vuelve a entrenar A (fase A2):
+- **remanence:** qué tan bien queda A justo después de B,
+- **coercivity_steps:** cuántos pasos tarda en recuperar (p. ej. 95% del nivel de MA),
+- **hysteresis_area:** área de “déficit” durante la recuperación.
+
+### (d) Robustez a ruido
+Archivo: `src/clmi/metrics/robustness.py`
+
+Evalúa el desempeño en:
+- entradas limpias,
+- entradas con ruido (typos / reemplazo de clave),
+- ruido agregado en embeddings (hook sobre la capa de embeddings).
+
+---
+
+## 4) Subespacios causales por capa (proyectores)
+Archivo: `src/clmi/causal/subspaces.py`
+
+Aquí se construye una representación del “subespacio” relevante para cada tarea.
+
+Resumen:
+- Se ejecuta el modelo y se extrae el **hidden state residual** en la última posición del prompt.
+- Se define un objetivo `y` basado en **logit_diff** (logit de token correcto − token negativo).
+- Para cada capa se ajusta un subespacio de dimensión `k`:
+  - se entrenan muchos regresores Ridge con bootstrap,
+  - se apilan sus vectores y se ortonormaliza (QR),
+  - eso produce una base `U` y un proyector `P = U U^T`.
+
+Estos proyectores se cachean en `results/cache/projectors/`.
+
+---
+
+## 5) No conmutatividad (NC): la hipótesis central
+Archivo: `src/clmi/metrics/noncommutativity.py`
+
+Con proyectores `P_A` y `P_B` por capa se mide:
+
+- **NC por capa:** tamaño del conmutador
+  
+  \[ [P_A, P_B] = P_A P_B - P_B P_A \]
+  
+  usando la norma de Frobenius `||·||_F`.
+
+- **NC global:** promedio ponderado entre capas.
+
+**Intuición para explicarlo:**
+- Si los “mecanismos” que necesita A y los que necesita B se superponen de manera conflictiva, sus proyectores pueden “pelearse”.
+- La no conmutatividad intenta cuantificar esa incompatibilidad.
+
+Además hay un concepto de **NC funcional**:
+- se compara intervenir primero con A y luego con B (**AB**) vs al revés (**BA**)
+- y se mide divergencia entre distribuciones de salida.
+
+---
+
+## 6) Intervenciones funcionales (AB vs BA)
+Archivo: `src/clmi/causal/patching.py` + `src/clmi/model/hooks.py`
+
+Se define una intervención “suave” sobre hidden states:
+
+- aplicar una proyección `P` y sumar/restar un término:
+  - `reinforce`: `h ← h + β · (hP)`
+  - `suppress`: `h ← h − β · (hP)`
+
+Luego se compara:
+- aplicar proyectores de A y B en orden **AB**
+- vs en orden **BA**
+
+y se mide `KL(p_AB || p_BA)` sobre un set de prompts.
+
+---
+
+## 7) Kernels: convertir tareas en “similitudes”
+Archivo: `src/clmi/kernels/kernels.py`
+
+Se definen 3 kernels entre tareas:
+
+1. **k_proj (solapamiento de subespacios)**
+   - suma `Tr(P_A P_B)` por capa.
+
+2. **k_NC (kernel basado en no conmutatividad)**
+   - `exp( −γ · ||[P_A,P_B]||^2 )`.
+
+3. **k_func (kernel funcional)**
+   - compara embeddings de efecto de intervención `phi(T)` (lineal o RBF).
+
+En `scripts/run_experiments.py` estos kernels se usan para:
+- construir matrices kernel,
+- correlacionarlas con métricas de forgetting/interferencia,
+- ajustar modelos simples tipo kernel ridge para “predecir” forgetting.
+
+---
+
+## 8) Mitigaciones probadas (para reducir interferencia)
+Script: `scripts/run_pair.py`
+
+Durante la fase B se prueban opciones:
+
+- `--mitigation none`: baseline.
+
+- `--mitigation freeze_nc`:
+  - calcula NC pre‑B,
+  - elige las capas con NC más alta,
+  - las congela para que B no las modifique.
+
+- `--mitigation anchor_reg`:
+  - calcula “targets” de activaciones (anchors) en capas problemáticas (top‑NC),
+  - durante entrenamiento en B agrega un término que empuja a mantener esas activaciones.
+
+---
+
+## 9) Cómo se corre (comandos típicos)
+
+### Correr 1 experimento A/B (un par)
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/PIG.git
-cd PIG
-
-# Install uv (recommended)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Sync project + dev dependencies
-uv sync --dev
-
-# Run CLI commands without manual venv activation
-uv run pig --help
-```
-
-If `uv` is not yet in your `PATH`, use:
-
-```bash
-~/.local/bin/uv sync --dev
-~/.local/bin/uv run pig --help
-```
-
-Legacy `pip` workflow is still supported:
-
-```bash
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate
-
-# Install the package
-pip install -e .
-
-# For development
-pip install -e ".[dev]"
-```
-
-## CLI Entry Point
-
-Recommended invocation (no manual venv activation):
-
-```bash
-uv run pig pipeline
-```
-
-Run with the ultralight in-repo toy model:
-
-```bash
-uv run pig pipeline --model-name toy_transformer
-```
-
-Direct invocation also works if your environment exposes `pig` in `PATH`:
-
-```bash
-pig pipeline
-```
-
-If you want to continue even if a stage fails:
-
-```bash
-pig pipeline --continue-on-error
-```
-
-### Using uv or pdm
-
-Both work with this repo because it is standard `pyproject.toml` + setuptools.
-
-- Recommended: `uv` for speed and simpler day-to-day workflow.
-- Use `pdm` if you need stronger dependency-group workflow and lockfile control.
-
-Typical commands:
-
-```bash
-# uv
-uv sync --dev
-uv run pig --help
-uv run pig pipeline
-uv run pig pipeline --continue-on-error
-uv run pig pipeline --model-name toy_transformer
-uv run python scripts/compare_model_memory.py --model-a gpt2 --model-b toy_transformer --device cpu
-
-# pdm
-pdm install -G dev
-pdm run pig pipeline
-# or using script alias from pyproject.toml
-pdm run pipeline
-```
-
-## Quick Start
-
-```python
-from pig.model import create_model
-from pig.prompts import create_ioi_dataset
-from pig.patching import compute_patch_effects
-from pig.graph import create_graph_builder
-from pig.embeddings import compute_wl_features
-from pig.kernels import train_classical_baseline
-
-# 1. Load a model with activation hooks
-model = create_model(model_name="gpt2")
-# model = create_model(model_name="toy_transformer")
-
-# 2. Generate clean/corrupted prompt pairs
-dataset = create_ioi_dataset(n_examples=50, corruption="name_swap", seed=42)
-
-# 3. Compute patch effects for all (layer, token[, component]) positions
-# Use node_types=("res", "mlp", "att") for fine-grained components.
-effects = compute_patch_effects(model, dataset)
-
-# 4. Build graphs from patch effects
-builder = create_graph_builder(
-    builder_name="correlation_topk",
-    k=5,
-    enforce_direction=True,
-)
-graphs = builder.build_all(effects)
-
-# 5. Compute WL graph embeddings
-features = compute_wl_features(graphs, depth=3)
-
-# 6. Train a classical kernel baseline
-classifier, results = train_classical_baseline(features, kernel="rbf")
-print(f"Cross-validation accuracy: {results['accuracy_mean']:.2%}")
-```
-
-## Architecture
-
-```
-src/pig/
-├── model.py       # HookedModel: activation capture & patching
-├── toy_model/     # ToyHookedModel package: tiny local transformer for fast tests
-│   ├── __init__.py
-│   ├── config.py
-│   ├── layers.py
-│   ├── model.py
-│   └── trainer.py
-├── graphs/        # Graph strategy plugins (one file per strategy)
-│   ├── base.py
-│   ├── registry.py
-│   ├── correlation_topk.py
-│   └── abs_correlation_topk.py
-├── prompts.py     # Prompt generators (IOI task, corruption strategies)
-├── patching.py    # Patch-effect tensor computation & caching
-├── graph.py       # Graph construction from effects
-├── embeddings.py  # Weisfeiler-Lehman graph embeddings
-├── kernels.py     # Classical SVM classifiers (linear, RBF)
-├── quantum.py     # Quantum feature maps + fidelity kernels
-└── visualization.py  # Heatmaps, PCA, and reporting outputs
-```
-
-## Model Architectures Used in PIG
-
-### GPT-2 (`HookedModel` backend)
-
-```mermaid
-flowchart TD
-    A[Text prompt] --> B[GPT-2 tokenizer]
-    B --> C[input_ids: 1 x seq_len]
-    C --> D[token embedding + positional embedding]
-    D --> E[Transformer Block 0]
-    E --> F[Transformer Block 1]
-    F --> G[...]
-    G --> H[Transformer Block n_layer-1]
-    H --> I[Final LayerNorm ln_f]
-    I --> J[lm_head projection to vocab]
-    J --> K[logits: 1 x seq_len x vocab_size]
-
-    subgraph BLK[GPT-2 block i: model.transformer.h[i]]
-        direction TB
-        L1[Input residual stream x]
-        L1 --> L2[LayerNorm]
-        L2 --> L3[Self-attention QKV]
-        L3 --> L4[Head concat -> c_proj]
-        L4 --> L5[Residual add]
-        L5 --> L6[LayerNorm]
-        L6 --> L7[MLP]
-        L7 --> L8[Residual add -> block output]
-    end
-
-    classDef hook fill:#eef,stroke:#446,stroke-width:1px
-    M1[[res hook\nblock output hidden_states]]:::hook
-    M2[[mlp hook\nblock.mlp output]]:::hook
-    M3[[att hook\npre-hook at block.attn.c_proj\n(per-head slices)]]:::hook
-
-    L8 -. capture/patch .-> M1
-    L7 -. capture/patch .-> M2
-    L4 -. capture/patch .-> M3
-```
-
-Detail captured by PIG patching API:
-
-- `res`: residual stream per `(layer, token)` from each transformer block output.
-- `mlp`: MLP output per `(layer, token)` from `block.mlp`.
-- `att`: per-head vectors per `(layer, token, head)` at `attn.c_proj` input.
-
-### Toy Transformer (`ToyHookedModel` backend)
-
-```mermaid
-flowchart TD
-    T0[Text prompt] --> T1[Regex tokenizer]
-    T1 --> T2[Hashed token IDs\nsha256 -> modulo vocab]
-    T2 --> T3[input_ids: 1 x seq_len]
-    T3 --> T4[token_embedding + position_embedding]
-    T4 --> T5[Tiny layer 0]
-    T5 --> T6[Tiny layer 1]
-    T6 --> T7[... up to n_layers-1]
-    T7 --> T8[LayerNorm ln_f]
-    T8 --> T9[lm_head]
-    T9 --> T10[logits: 1 x seq_len x vocab_size]
-
-    subgraph TBLK[_TinyLayer i (pre-norm)]
-        direction TB
-        U1[Input residual x]
-        U1 --> U2[ln_1]
-        U2 --> U3[Linear qkv -> q,k,v]
-        U3 --> U4[Causal masked attention per head]
-        U4 --> U5[Head outputs shape\n1 x seq_len x n_heads x head_dim]
-        U5 --> U6[out_proj on flattened heads]
-        U6 --> U7[Residual add]
-        U7 --> U8[ln_2]
-        U8 --> U9[fc_1 -> GELU -> fc_2]
-        U9 --> U10[Residual add -> block output]
-    end
-
-    classDef hook fill:#efe,stroke:#464,stroke-width:1px
-    V1[[att hook\nhead outputs before out_proj]]:::hook
-    V2[[mlp hook\nmlp_out before residual add]]:::hook
-    V3[[res hook\nblock output x]]:::hook
-
-    U5 -. capture/patch .-> V1
-    U9 -. capture/patch .-> V2
-    U10 -. capture/patch .-> V3
-```
-
-Default toy config (`TinyTransformerConfig`):
-
-- `vocab_size=512`, `max_seq_len=128`
-- `d_model=64`, `n_layers=2`, `n_heads=4`, `head_dim=16`
-- `mlp_dim=128`
-
-## Core Concepts
-
-### Paired Inputs
-
-For each example, create `(x_clean, x_corrupt)` where the corruption breaks the target behavior:
-
-```python
-# Clean: "John gave the book to Mary. Mary gave it back to" → predict "John"
-# Corrupt: "Mary gave the book to Mary. Mary gave it back to" → predict "Mary"
-```
-
-### Patch Effect
-
-The causal effect of patching node `u = (layer, token)`:
-
-```
-E_u = O(patched_forward(x_corrupt; u)) - O(forward(x_corrupt))
-```
-
-where `O` is the observable (target token logit).
-
-### Slices
-
-Groups of examples by task family, corruption type, or difficulty. Each slice produces one graph.
-
-### Graph Construction
-
-- **Nodes**: Fixed set of `(layer, token)` positions
-- **Edges**: Correlation of effect profiles within a slice
-- **Direction**: Edges only from earlier to later positions
-- **Sparsity**: Top-k outgoing edges per node
-
-## Modules
-
-### `pig.model` - Model Setup
-
-```python
-from pig.model import HookedModel
-
-model = HookedModel(model_name="gpt2", device="cuda")
-
-# Cache clean activations
-cache = model.cache_clean("The capital of France is")
-
-# Compute observable
-score = model.score("The capital of France is", "Paris")
-
-# Patch and compute
-patched = model.patched_score(
-    "The capital of Germany is", "Paris", cache, (6, 4)
-)
-```
-
-### `pig.toy_model` - Ultra-Simple Local Transformer (for tests)
-
-```python
-from pig.toy_model import (
-    TinyTrainingConfig,
-    TinyTransformerConfig,
-    ToyHookedModel,
-    train_toy_model,
-)
-
-toy = ToyHookedModel(
-    config=TinyTransformerConfig(
-        d_model=32, n_layers=2, n_heads=4, mlp_dim=64, max_seq_len=96
-    ),
-    device="cpu",
-)
-
-history = train_toy_model(
-    toy,
-    texts=[
-        "Alice gave the book to Bob .",
-        "Bob gave the book to Alice .",
-    ],
-    config=TinyTrainingConfig(epochs=3, learning_rate=1e-3),
-)
-print(history[-1].mean_loss)
-```
-
-```bash
-# Train directly from a corpus file (one sample per line)
-uv run python -m pig.toy_model.trainer \
-  --data-file data/toy_corpus.txt \
-  --epochs 10 \
-  --save-path outputs/toy_model.pt
-```
-
-### `pig.prompts` - Prompt Generation
-
-```python
-from pig.prompts import IOIGenerator, create_ioi_dataset
-
-# Using the generator directly
-gen = IOIGenerator(seed=42)
-pair = gen.generate()
-print(pair.x_cln)    # Clean prompt
-print(pair.x_crp)    # Corrupted prompt
-print(pair.y_star)   # Target token
-
-# Convenience function
-dataset = create_ioi_dataset(n_examples=100, corruption="name_swap")
-```
-
-### `pig.patching` - Effect Computation
-
-```python
-from pig.patching import compute_patch_effects, PatchEffectComputer
-
-# With caching
-dataset = compute_patch_effects(
-    model, prompt_pairs,
-    cache_dir=".cache/effects",
-    show_progress=True
-)
-
-# Access effects
-for tensor in dataset:
-    print(tensor.shape)  # (num_layers, num_tokens)
-    hotspots = tensor.get_significant_positions(threshold=0.1)
-```
-
-### `pig.graph` - Graph Construction
-
-```python
-from pig.graph import create_graph_builder, get_available_graph_builders
-
-print(get_available_graph_builders())
-# ['abs_correlation_topk', 'correlation_topk', ...]
-
-builder = create_graph_builder(
-    builder_name="correlation_topk",
-    k=5,
-    enforce_direction=True,
-)
-
-# Per-slice graphs (correlation-based)
-graphs = builder.build_all(dataset)
-
-# Per-example graphs (for classification)
-graphs_with_labels = builder.build_per_example(dataset)
-```
-
-```bash
-# Run the full pipeline with a selected graph strategy
-uv run pig pipeline --model-name toy_transformer --graph-builder correlation_topk
-```
-
-### `pig.embeddings` - WL Features
-
-```python
-from pig.embeddings import compute_wl_features, WLEncoder
-
-# From slice graphs
-features = compute_wl_features(graphs, depth=3)
-X = features.to_matrix()  # Shape: [num_slices, num_features]
-
-# From per-example graphs
-from pig.embeddings import compute_wl_features_from_list
-features = compute_wl_features_from_list(graphs_with_labels, depth=3)
-```
-
-### `pig.kernels` - Classification
-
-```python
-from pig.kernels import ClassicalKernelClassifier, train_classical_baseline
-
-# Quick training with cross-validation
-clf, cv_results = train_classical_baseline(features, kernel="rbf")
-
-# Manual control
-clf = ClassicalKernelClassifier(kernel="linear", C=1.0)
-clf.fit(X_train, y_train)
-predictions = clf.predict(X_test)
-result = clf.evaluate(X_test, y_test)
-```
-
-### `pig.quantum` - Quantum Kernels
-
-```python
-from pig.quantum import compute_quantum_kernel_matrix, train_quantum_kernel_baseline
-
-# Compute a quantum kernel matrix from WL features
-K, reducer = compute_quantum_kernel_matrix(
-    features,
-    n_qubits=4,
-    depth=2,
-    shots=500,
-    reduction="pca",
-)
-
-# Train an SVM with the precomputed quantum kernel
-clf, cv_results, _ = train_quantum_kernel_baseline(
-    features,
-    n_qubits=4,
-    depth=2,
-    shots=500,
-    reduction="pca",
-)
-```
-
-### `pig.visualization` - Patching Heatmaps (Layer x Token)
-
-```python
-from pig.visualization import (
-    prepare_patching_heatmap_inputs,
-    plot_patching_heatmap_layer_token,
-)
-
-E, nodes_df, examples_df = prepare_patching_heatmap_inputs(dataset)
-
-result = plot_patching_heatmap_layer_token(
-    E=E,
-    nodes_df=nodes_df,
-    examples_df=examples_df,
-    slice_filter="ioi:name_swap",  # or ["ioi:name_swap", "ioi:abba"]
-    component="resid",
-    agg="mean",                    # "mean" or "median"
-    subset="all",                  # or "clean_correct_corrupted_wrong"
-)
-
-print(result["output_png"])
-print(result["output_html"])
-print(result["output_json"])
-```
-
-## Implementation Status
-
-| Phase | Story | Status |
-|-------|-------|--------|
-| 1. Foundation | 1.1 Model Setup | ✅ Complete |
-| 1. Foundation | 1.2 Prompt Generator | ✅ Complete |
-| 2. Patching | 2.1 Patching Hooks | ✅ Complete |
-| 2. Patching | 2.2 Effect Tensors | ✅ Complete |
-| 3. Graphs | 3.1 Graph Builder | ✅ Complete |
-| 4. Classical | 4.1 WL Embeddings | ✅ Complete |
-| 4. Classical | 4.2 SVM Baseline | ✅ Complete |
-| 5. Quantum | 5.1 Quantum Circuit | ✅ Complete |
-| 5. Quantum | 5.2 Fidelity Kernel | ✅ Complete |
-| 6. Evaluation | 6.1 Ablations | ⏳ Not Started |
-| 6. Evaluation | 6.2 Figures | ⏳ Not Started |
-| 7. Packaging | 7.1 Caching | ✅ Complete |
-| 7. Packaging | 7.2 CLI | ⏳ Not Started |
-| 7. Packaging | 7.3 Tests | ✅ Complete |
-
-## Documentation
-
-- [docs/patching_graphs_v2.pdf](docs/patching_graphs_v2.pdf) - Original slide deck with theoretical foundations
-- [docs/api.md](docs/api.md) - API reference
-- [PLAN.md](PLAN.md) - Detailed implementation plan with acceptance criteria
-
-## License
-
-See [LICENSE](LICENSE).
-
-## Acknowledgments
-
-This work is tutored by David Olivieri from University of Vigo.
-
-Ruben Fernandez-Boullon
-
-## CLMI Suite (GPT-2 Continual Learning + Mechanistic Interpretability)
-
-This repository also includes a full, reproducible research-code pipeline under `src/clmi/` for:
-
-1. Synthetic A/B dictionary tasks with controlled overlap/conflict.
-2. Continual-learning cycles (`A->B` and `A->B->A`) on GPT-2.
-3. Layerwise causal subspaces and projectors (`U_{l,T}`, `P_{l,T}`).
-4. Operator and functional non-commutativity metrics.
-5. Task kernels (`k_proj`, `k_NC`, `k_func`) and downstream analysis.
-6. Forgetting/interference prediction and curriculum experiments.
-7. Mitigations (LoRA vs full FT, freeze high-NC layers, anchor regularization).
-8. Robustness under input/embedding noise with automatic figures and tables.
-
-### Hypothesis
-
-The central hypothesis is: **non-commutativity between task-induced causal subspaces predicts continual-learning interference/forgetting and localizes conflict by layer**.
-
-### CLMI Layout
-
-```text
-src/clmi/
-  data/        # synthetic tasks + clean GPT-2 token selection
-  model/       # GPT-2 loader, full/LoRA fine-tuning, interventions
-  causal/      # logit-diff, subspaces/projectors, AB vs BA patching
-  metrics/     # forgetting/hysteresis, non-commutativity, robustness
-  kernels/     # k_proj, k_NC, k_func, curriculum, KRR prediction
-  viz/         # matplotlib figures
-  utils/       # typed config, seeds, IO/cache
-scripts/
-  run_pair.py
-  run_experiments.py
-```
-
-### Smoke Run (CPU)
-
-```bash
-python scripts/run_experiments.py \
-  --model gpt2 \
-  --device cpu \
-  --seeds 1 \
-  --overlaps 0 \
-  --n_pairs_per_overlap 1 \
-  --k 8 \
-  --beta 0.2 \
-  --smoke
-```
-
-If you already have model weights cached locally and want to avoid network access:
-
-```bash
-python scripts/run_experiments.py \
-  --model gpt2 \
-  --device cpu \
-  --seeds 1 \
-  --overlaps 0 \
-  --n_pairs_per_overlap 1 \
-  --k 8 \
-  --beta 0.2 \
-  --smoke \
-  --local-files-only
-```
-
-### Full Suite
-
-```bash
-python scripts/run_experiments.py \
+uv run python scripts/run_pair.py \
   --model gpt2 \
   --device auto \
-  --seeds 5 \
-  --overlaps 0 0.25 0.5 0.75 \
-  --n_pairs_per_overlap 10 \
-  --k 16 \
-  --beta 0.2
+  --seed 0 \
+  --pair-id 0 \
+  --overlap 0.5 \
+  --ft-mode full \
+  --mitigation none
 ```
 
-`run_experiments.py` calls `run_pair.py` repeatedly and writes:
+### Correr la batería completa (muchos overlaps/seeds)
 
-- `results/tables/summary.csv`
-- `results/tables/nc_layers_all.csv`
-- `results/runs/<run_id>/...` (config, checkpoints, curves, robustness, per-layer NC, bases)
-- `results/figures/*.png`
+```bash
+uv run python scripts/run_experiments.py --model gpt2 --device auto
+```
 
-### Core Output Columns
+(Para corridas grandes hay un script tipo “serio” en `scripts/run_serious.sh`.)
 
-`summary.csv` includes at least:
+---
 
-- `overlap, seed, pair_id, ft_mode, mitigation`
-- `AccA_MA, AccA_MAB, AccB_MAB, forgettingA`
-- `remanenceA, coercivity_steps, hysteresis_area`
-- `NC_global, mean_NC_layers, KL_AB_BA`
-- `k_proj, k_NC, k_func`
-- `grad_overlap, random_nc_control`
+## 10) Qué sale al final (artefactos)
+Los resultados típicos quedan en:
+- `results/runs/<run_id>/` (cada corrida individual)
+- `results/tables/` (resúmenes agregados)
+- `outputs/figures/` o `results/figures/` (plots)
 
-Additional derived tables produced by `run_experiments.py`:
+Ejemplos de archivos por corrida:
+- `pair_metrics.json` (métricas finales)
+- `nc_layers.csv` (NC por capa)
+- `hysteresis_curve.csv` (curva A→B→A2)
+- `robustness_A.csv`, `robustness_B.csv`
+- `phi_embeddings.npz` (para análisis kernel offline)
 
-- `results/tables/kernel_predict_forgetting.csv` (kernel ridge predictions)
-- `results/tables/kernel_predict_metrics.json` (RMSE/R2)
-- `results/tables/curriculum_knc.csv` (greedy anti-conflict order)
-- `results/tables/task_clusters_knc.csv` (spectral clustering from kernel matrix)
+---
 
-### Figure Guide
-
-Generated automatically in `results/figures/`:
-
-1. `scatter_nc_vs_forgetting.png`: tests whether larger `NC_global` associates with larger forgetting.
-2. `heatmap_nc_per_layer_by_overlap.png`: layer conflict localization by overlap.
-3. `hysteresis_overlap_<s>.png`: recovery dynamics in `A->B->A`.
-4. `kernel_matrix_kproj.png` and `kernel_matrix_knc.png`: task-kernel geometry.
-5. `mitigation_comparison_bars.png`: average forgetting by mitigation mode.
+## 11) Explicación “en una frase” (para decirlo en voz alta)
+Entrenamos GPT‑2 en dos tareas sintéticas A y B que compiten por las mismas claves, medimos cuánto olvida A tras aprender B, extraemos subespacios por capa que explican el comportamiento, cuantificamos su incompatibilidad con no conmutatividad (incluyendo intervención AB vs BA), y probamos mitigaciones (congelar capas conflictivas o regularización por anclas) para reducir el olvido.
