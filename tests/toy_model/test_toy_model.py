@@ -86,3 +86,25 @@ def test_invalid_attention_patch_node_requires_head():
 
     with pytest.raises(ValueError):
         model.patched_score(pair.x_crp, pair.y_star, cache, (0, 0, "att"))
+
+
+def test_patched_score_multi_with_capture_and_clamp():
+    model = _make_model()
+    pair = create_ioi_dataset(n_examples=1, corruption="name_swap", seed=5)[0]
+
+    clean_cache = model.cache_clean_components(pair.x_cln, node_types=("att",))
+    base_cache = model.cache_clean_components(pair.x_crp, node_types=("att",))
+
+    score, captured = model.patched_score_multi_with_capture(
+        pair.x_crp,
+        pair.y_star,
+        patch_cache=clean_cache,
+        patch_nodes={(0, 0, "att", 0)},
+        capture_nodes={(1, 1, "att", 0)},
+        clamp_cache=base_cache,
+        clamp_nodes={(1, 1, "att", 0)},
+    )
+
+    assert isinstance(score, float)
+    assert not np.isnan(score)
+    assert captured.get(1, 1, node_type="att", head=0) is not None

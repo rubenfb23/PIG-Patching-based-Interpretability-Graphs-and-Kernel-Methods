@@ -193,8 +193,11 @@ class ToyHookedModel(nn.Module):
         input_ids: Tensor,
         capture_cache: ActivationCache | None = None,
         capture_components: set[str] | None = None,
+        capture_positions: set[tuple[int, int, str, Optional[int]]] | None = None,
         patch_cache: ActivationCache | None = None,
         patch_positions: set[tuple[int, int, str, Optional[int]]] | None = None,
+        patch_sources: dict[tuple[int, int, str, Optional[int]], ActivationCache]
+        | None = None,
     ) -> Tensor:
         """Forward pass with optional activation capture/patching."""
         batch_size, seq_len = input_ids.shape
@@ -204,7 +207,9 @@ class ToyHookedModel(nn.Module):
             raise ValueError("Sequence length exceeds max_seq_len")
 
         capture_components = capture_components or set()
+        capture_positions = capture_positions or set()
         patch_positions = patch_positions or set()
+        patch_sources = patch_sources or {}
 
         positions = torch.arange(seq_len, device=input_ids.device).unsqueeze(0)
         x = self.token_embedding(input_ids) + self.position_embedding(positions)
@@ -231,6 +236,9 @@ class ToyHookedModel(nn.Module):
             if capture_cache is not None and NODE_TYPE_ATT in capture_components:
                 for token_idx in range(seq_len):
                     for head_idx in range(self.n_heads):
+                        node = (layer_idx, token_idx, NODE_TYPE_ATT, head_idx)
+                        if capture_positions and node not in capture_positions:
+                            continue
                         capture_cache.store(
                             layer_idx,
                             token_idx,
@@ -239,12 +247,15 @@ class ToyHookedModel(nn.Module):
                             head=head_idx,
                         )
 
-            if patch_cache is not None and patch_positions:
+            if patch_positions and (patch_cache is not None or patch_sources):
                 for token_idx in range(seq_len):
                     for head_idx in range(self.n_heads):
                         node = (layer_idx, token_idx, NODE_TYPE_ATT, head_idx)
                         if node in patch_positions:
-                            patch_act = patch_cache.get(
+                            source_cache = patch_sources.get(node, patch_cache)
+                            if source_cache is None:
+                                continue
+                            patch_act = source_cache.get(
                                 layer_idx,
                                 token_idx,
                                 node_type=NODE_TYPE_ATT,
@@ -263,6 +274,9 @@ class ToyHookedModel(nn.Module):
 
             if capture_cache is not None and NODE_TYPE_MLP in capture_components:
                 for token_idx in range(seq_len):
+                    node = (layer_idx, token_idx, NODE_TYPE_MLP, None)
+                    if capture_positions and node not in capture_positions:
+                        continue
                     capture_cache.store(
                         layer_idx,
                         token_idx,
@@ -270,11 +284,14 @@ class ToyHookedModel(nn.Module):
                         node_type=NODE_TYPE_MLP,
                     )
 
-            if patch_cache is not None and patch_positions:
+            if patch_positions and (patch_cache is not None or patch_sources):
                 for token_idx in range(seq_len):
                     node = (layer_idx, token_idx, NODE_TYPE_MLP, None)
                     if node in patch_positions:
-                        patch_act = patch_cache.get(
+                        source_cache = patch_sources.get(node, patch_cache)
+                        if source_cache is None:
+                            continue
+                        patch_act = source_cache.get(
                             layer_idx, token_idx, node_type=NODE_TYPE_MLP
                         )
                         if patch_act is not None:
@@ -286,6 +303,9 @@ class ToyHookedModel(nn.Module):
 
             if capture_cache is not None and NODE_TYPE_RES in capture_components:
                 for token_idx in range(seq_len):
+                    node = (layer_idx, token_idx, NODE_TYPE_RES, None)
+                    if capture_positions and node not in capture_positions:
+                        continue
                     capture_cache.store(
                         layer_idx,
                         token_idx,
@@ -293,11 +313,14 @@ class ToyHookedModel(nn.Module):
                         node_type=NODE_TYPE_RES,
                     )
 
-            if patch_cache is not None and patch_positions:
+            if patch_positions and (patch_cache is not None or patch_sources):
                 for token_idx in range(seq_len):
                     node = (layer_idx, token_idx, NODE_TYPE_RES, None)
                     if node in patch_positions:
-                        patch_act = patch_cache.get(
+                        source_cache = patch_sources.get(node, patch_cache)
+                        if source_cache is None:
+                            continue
+                        patch_act = source_cache.get(
                             layer_idx, token_idx, node_type=NODE_TYPE_RES
                         )
                         if patch_act is not None:
@@ -350,6 +373,76 @@ class ToyHookedModel(nn.Module):
         return model_score + lexical_bonus
 
     @torch.no_grad()
+    def _run_patched_forward(
+        self,
+        prompt: str,
+        target_token: str,
+        patch_cache: ActivationCache | None,
+        patch_nodes: Iterable[tuple] | None,
+        capture_nodes: Iterable[tuple] | None = None,
+        clamp_cache: ActivationCache | None = None,
+        clamp_nodes: Iterable[tuple] | None = None,
+    ) -> tuple[float, ActivationCache]:
+        normalized_patch = (
+            self._normalize_patch_nodes(patch_nodes)
+            if patch_nodes is not None
+            else set()
+        )
+        normalized_clamp = (
+            self._normalize_patch_nodes(clamp_nodes)
+            if clamp_nodes is not None
+            else set()
+        )
+        overlap = normalized_patch & normalized_clamp
+        if overlap:
+            raise ValueError(f"Overlapping patch/clamp nodes are not allowed: {overlap}")
+        if normalized_patch and patch_cache is None:
+            raise ValueError("patch_cache is required when patch_nodes is not empty")
+        if normalized_clamp and clamp_cache is None:
+            raise ValueError("clamp_cache is required when clamp_nodes is not empty")
+
+        normalized_capture = (
+            self._normalize_patch_nodes(capture_nodes)
+            if capture_nodes is not None
+            else set()
+        )
+        capture_components = {node[2] for node in normalized_capture}
+        if capture_components:
+            self._validate_node_types(capture_components)
+
+        patch_sources: dict[
+            tuple[int, int, str, Optional[int]],
+            ActivationCache,
+        ] = {}
+        for node in normalized_patch:
+            if patch_cache is not None:
+                patch_sources[node] = patch_cache
+        for node in normalized_clamp:
+            if clamp_cache is not None:
+                patch_sources[node] = clamp_cache
+
+        capture_cache = ActivationCache()
+        input_ids = self.tokenize(prompt)
+        logits = self._run_model(
+            input_ids,
+            capture_cache=capture_cache if normalized_capture else None,
+            capture_components=capture_components,
+            capture_positions=normalized_capture,
+            patch_cache=patch_cache,
+            patch_positions=normalized_patch | normalized_clamp,
+            patch_sources=patch_sources,
+        )
+        target_id = self.get_token_id(target_token)
+        model_score = float(logits[0, -1, target_id].item())
+        lexical_bonus = self._presence_bonus(prompt, target_token)
+        total_patch_bonus = sum(
+            self._single_patch_bonus(prompt, target_token, patch_sources[node], node)
+            for node in normalized_patch
+            if node in patch_sources
+        )
+        return model_score + lexical_bonus + total_patch_bonus, capture_cache
+
+    @torch.no_grad()
     def patched_score(
         self,
         prompt: str,
@@ -357,23 +450,13 @@ class ToyHookedModel(nn.Module):
         cache: ActivationCache,
         patch_node: tuple,
     ) -> float:
-        normalized = self._normalize_patch_node(patch_node)
-        input_ids = self.tokenize(prompt)
-        logits = self._run_model(
-            input_ids,
+        score, _ = self._run_patched_forward(
+            prompt=prompt,
+            target_token=target_token,
             patch_cache=cache,
-            patch_positions={normalized},
+            patch_nodes={patch_node},
         )
-        target_id = self.get_token_id(target_token)
-        model_score = float(logits[0, -1, target_id].item())
-        lexical_bonus = self._presence_bonus(prompt, target_token)
-        patch_bonus = self._single_patch_bonus(
-            prompt,
-            target_token,
-            cache,
-            normalized,
-        )
-        return model_score + lexical_bonus + patch_bonus
+        return score
 
     @torch.no_grad()
     def patched_score_multi(
@@ -383,21 +466,34 @@ class ToyHookedModel(nn.Module):
         cache: ActivationCache,
         patch_nodes: set[tuple],
     ) -> float:
-        normalized_nodes = self._normalize_patch_nodes(patch_nodes)
-        input_ids = self.tokenize(prompt)
-        logits = self._run_model(
-            input_ids,
+        score, _ = self._run_patched_forward(
+            prompt=prompt,
+            target_token=target_token,
             patch_cache=cache,
-            patch_positions=normalized_nodes,
+            patch_nodes=patch_nodes,
         )
-        target_id = self.get_token_id(target_token)
-        model_score = float(logits[0, -1, target_id].item())
-        lexical_bonus = self._presence_bonus(prompt, target_token)
-        total_patch_bonus = sum(
-            self._single_patch_bonus(prompt, target_token, cache, node)
-            for node in normalized_nodes
+        return score
+
+    @torch.no_grad()
+    def patched_score_multi_with_capture(
+        self,
+        prompt: str,
+        target_token: str,
+        patch_cache: ActivationCache | None,
+        patch_nodes: Iterable[tuple],
+        capture_nodes: Iterable[tuple] | None = None,
+        clamp_cache: ActivationCache | None = None,
+        clamp_nodes: Iterable[tuple] | None = None,
+    ) -> tuple[float, ActivationCache]:
+        return self._run_patched_forward(
+            prompt=prompt,
+            target_token=target_token,
+            patch_cache=patch_cache,
+            patch_nodes=patch_nodes,
+            capture_nodes=capture_nodes,
+            clamp_cache=clamp_cache,
+            clamp_nodes=clamp_nodes,
         )
-        return model_score + lexical_bonus + total_patch_bonus
 
     def get_num_layers(self) -> int:
         return self.n_layers

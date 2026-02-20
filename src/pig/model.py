@@ -66,8 +66,8 @@ class ActivationCache:
         """Get all activations for a specific layer and node type."""
         return {
             token: act
-            for (l, token, ntype, nhead), act in self.activations.items()
-            if l == layer and ntype == node_type and nhead == head
+            for (layer_idx, token, ntype, nhead), act in self.activations.items()
+            if layer_idx == layer and ntype == node_type and nhead == head
         }
 
     def clear(self) -> None:
@@ -139,9 +139,34 @@ class HookedModel:
         self._hooks: list = []
         self._capture_cache: Optional[ActivationCache] = None
         self._patch_cache: Optional[ActivationCache] = None
+        self._patch_sources: dict[
+            tuple[int, int, str, Optional[int]],
+            ActivationCache,
+        ] = {}
         self._patch_positions: set[tuple[int, int, str, Optional[int]]] = set()
         self._capture_components: set[str] = {NODE_TYPE_RES}
+        self._capture_positions: Optional[
+            set[tuple[int, int, str, Optional[int]]]
+        ] = None
         self._patch_components: set[str] = set()
+
+    def _get_patch_activation(
+        self,
+        layer: int,
+        token: int,
+        node_type: str,
+        head: Optional[int] = None,
+    ) -> Optional[Tensor]:
+        node = (layer, token, node_type, head)
+        source_cache = self._patch_sources.get(node, self._patch_cache)
+        if source_cache is None:
+            return None
+        return source_cache.get(
+            layer,
+            token,
+            node_type=node_type,
+            head=head,
+        )
 
     def _setup_architecture_info(self) -> None:
         """Extract architecture information from the model."""
@@ -174,6 +199,9 @@ class HookedModel:
             # hidden_states shape: [batch, seq_len, d_model]
             seq_len = hidden_states.shape[1]
             for token in range(seq_len):
+                node = (layer, token, node_type, None)
+                if self._capture_positions is not None and node not in self._capture_positions:
+                    continue
                 self._capture_cache.store(
                     layer,
                     token,
@@ -191,7 +219,10 @@ class HookedModel:
         def hook(
             module: torch.nn.Module, inputs: tuple, output: tuple
         ) -> tuple | Tensor:
-            if self._patch_cache is None or not self._patch_positions:
+            if (
+                (self._patch_cache is None and not self._patch_sources)
+                or not self._patch_positions
+            ):
                 return output
             if isinstance(output, tuple):
                 hidden_states = output[0].clone()
@@ -201,7 +232,11 @@ class HookedModel:
                 tail = None
             for token in range(hidden_states.shape[1]):
                 if (layer, token, node_type, None) in self._patch_positions:
-                    patch_act = self._patch_cache.get(layer, token, node_type=node_type)
+                    patch_act = self._get_patch_activation(
+                        layer,
+                        token,
+                        node_type=node_type,
+                    )
                     if patch_act is not None:
                         hidden_states[0, token, :] = patch_act.to(hidden_states.device)
             if tail is None:
@@ -230,6 +265,9 @@ class HookedModel:
                 )
                 for token in range(seq_len):
                     for head in range(self.n_heads):
+                        node = (layer, token, NODE_TYPE_ATT, head)
+                        if self._capture_positions is not None and node not in self._capture_positions:
+                            continue
                         self._capture_cache.store(
                             layer,
                             token,
@@ -238,13 +276,17 @@ class HookedModel:
                             head=head,
                         )
 
-            if patch and self._patch_cache is not None and self._patch_positions:
+            if (
+                patch
+                and (self._patch_cache is not None or self._patch_sources)
+                and self._patch_positions
+            ):
                 updated = hidden_states.clone()
                 heads = updated.view(batch, seq_len, self.n_heads, self.head_dim)
                 for token in range(seq_len):
                     for head in range(self.n_heads):
                         if (layer, token, NODE_TYPE_ATT, head) in self._patch_positions:
-                            patch_act = self._patch_cache.get(
+                            patch_act = self._get_patch_activation(
                                 layer,
                                 token,
                                 node_type=NODE_TYPE_ATT,
@@ -301,21 +343,15 @@ class HookedModel:
             # Access the transformer block
             block = self.model.transformer.h[layer]
 
-            if capture and NODE_TYPE_RES in self._capture_components:
-                hook = block.register_forward_hook(
-                    self._make_capture_hook(layer, NODE_TYPE_RES)
-                )
-                self._hooks.append(hook)
-
             if patch and NODE_TYPE_RES in self._patch_components:
                 hook = block.register_forward_hook(
                     self._make_patch_hook(layer, NODE_TYPE_RES)
                 )
                 self._hooks.append(hook)
 
-            if capture and NODE_TYPE_MLP in self._capture_components:
-                hook = block.mlp.register_forward_hook(
-                    self._make_capture_hook(layer, NODE_TYPE_MLP)
+            if capture and NODE_TYPE_RES in self._capture_components:
+                hook = block.register_forward_hook(
+                    self._make_capture_hook(layer, NODE_TYPE_RES)
                 )
                 self._hooks.append(hook)
 
@@ -325,15 +361,21 @@ class HookedModel:
                 )
                 self._hooks.append(hook)
 
-            if capture and NODE_TYPE_ATT in self._capture_components:
-                hook = block.attn.c_proj.register_forward_pre_hook(
-                    self._make_attn_pre_hook(layer, capture=True, patch=False)
+            if capture and NODE_TYPE_MLP in self._capture_components:
+                hook = block.mlp.register_forward_hook(
+                    self._make_capture_hook(layer, NODE_TYPE_MLP)
                 )
                 self._hooks.append(hook)
 
             if patch and NODE_TYPE_ATT in self._patch_components:
                 hook = block.attn.c_proj.register_forward_pre_hook(
                     self._make_attn_pre_hook(layer, capture=False, patch=True)
+                )
+                self._hooks.append(hook)
+
+            if capture and NODE_TYPE_ATT in self._capture_components:
+                hook = block.attn.c_proj.register_forward_pre_hook(
+                    self._make_attn_pre_hook(layer, capture=True, patch=False)
                 )
                 self._hooks.append(hook)
 
@@ -445,6 +487,86 @@ class HookedModel:
         return last_pos_logits[target_id].item()
 
     @torch.no_grad()
+    def _run_patched_forward(
+        self,
+        prompt: str,
+        target_token: str,
+        patch_cache: Optional[ActivationCache],
+        patch_nodes: Optional[Iterable[tuple]],
+        capture_nodes: Optional[Iterable[tuple]] = None,
+        clamp_cache: Optional[ActivationCache] = None,
+        clamp_nodes: Optional[Iterable[tuple]] = None,
+    ) -> tuple[float, ActivationCache]:
+        normalized_patch = (
+            self._normalize_patch_nodes(patch_nodes)
+            if patch_nodes is not None
+            else set()
+        )
+        normalized_clamp = (
+            self._normalize_patch_nodes(clamp_nodes)
+            if clamp_nodes is not None
+            else set()
+        )
+
+        overlap = normalized_patch & normalized_clamp
+        if overlap:
+            raise ValueError(f"Overlapping patch/clamp nodes are not allowed: {overlap}")
+        if normalized_patch and patch_cache is None:
+            raise ValueError("patch_cache is required when patch_nodes is not empty")
+        if normalized_clamp and clamp_cache is None:
+            raise ValueError("clamp_cache is required when clamp_nodes is not empty")
+
+        normalized_capture = (
+            self._normalize_patch_nodes(capture_nodes)
+            if capture_nodes is not None
+            else set()
+        )
+
+        capture_cache = ActivationCache()
+        self._capture_cache = capture_cache if normalized_capture else None
+        self._capture_positions = normalized_capture if normalized_capture else None
+        self._capture_components = {node[2] for node in normalized_capture}
+
+        self._patch_cache = patch_cache if patch_cache is not None else clamp_cache
+        self._patch_sources = {}
+        self._patch_positions = normalized_patch | normalized_clamp
+        self._patch_components = {node[2] for node in self._patch_positions}
+
+        for node in normalized_patch:
+            if patch_cache is not None:
+                self._patch_sources[node] = patch_cache
+        for node in normalized_clamp:
+            if clamp_cache is not None:
+                self._patch_sources[node] = clamp_cache
+
+        if self._capture_components:
+            self._validate_node_types(self._capture_components)
+        if self._patch_components:
+            self._validate_node_types(self._patch_components)
+
+        self._register_hooks(
+            capture=bool(self._capture_components),
+            patch=bool(self._patch_components),
+        )
+
+        try:
+            input_ids = self.tokenize(prompt)
+            logits = self.forward(input_ids)
+        finally:
+            self._clear_hooks()
+            self._capture_cache = None
+            self._capture_positions = None
+            self._capture_components = {NODE_TYPE_RES}
+            self._patch_cache = None
+            self._patch_sources.clear()
+            self._patch_positions.clear()
+            self._patch_components.clear()
+
+        target_id = self.get_token_id(target_token)
+        last_pos_logits = logits[0, -1, :]
+        return float(last_pos_logits[target_id].item()), capture_cache
+
+    @torch.no_grad()
     def patched_score(
         self,
         prompt: str,
@@ -463,27 +585,13 @@ class HookedModel:
         Returns:
             The logit value after patching
         """
-        self._patch_cache = cache
-        normalized = self._normalize_patch_node(patch_node)
-        self._patch_positions = {normalized}
-        self._patch_components = {normalized[2]}
-        self._validate_node_types(self._patch_components)
-
-        self._register_hooks(capture=False, patch=True)
-
-        input_ids = self.tokenize(prompt)
-        logits = self.forward(input_ids)
-
-        self._clear_hooks()
-        self._patch_cache = None
-        self._patch_positions.clear()
-        self._patch_components.clear()
-
-        # Get logit for target token at last position
-        target_id = self.get_token_id(target_token)
-        last_pos_logits = logits[0, -1, :]
-
-        return last_pos_logits[target_id].item()
+        score, _ = self._run_patched_forward(
+            prompt=prompt,
+            target_token=target_token,
+            patch_cache=cache,
+            patch_nodes={patch_node},
+        )
+        return score
 
     @torch.no_grad()
     def patched_score_multi(
@@ -504,25 +612,40 @@ class HookedModel:
         Returns:
             The logit value after patching
         """
-        self._patch_cache = cache
-        self._patch_positions = self._normalize_patch_nodes(patch_nodes)
-        self._patch_components = {node[2] for node in self._patch_positions}
-        self._validate_node_types(self._patch_components)
+        score, _ = self._run_patched_forward(
+            prompt=prompt,
+            target_token=target_token,
+            patch_cache=cache,
+            patch_nodes=patch_nodes,
+        )
+        return score
 
-        self._register_hooks(capture=False, patch=True)
+    @torch.no_grad()
+    def patched_score_multi_with_capture(
+        self,
+        prompt: str,
+        target_token: str,
+        patch_cache: Optional[ActivationCache],
+        patch_nodes: Iterable[tuple],
+        capture_nodes: Optional[Iterable[tuple]] = None,
+        clamp_cache: Optional[ActivationCache] = None,
+        clamp_nodes: Optional[Iterable[tuple]] = None,
+    ) -> tuple[float, ActivationCache]:
+        """Run a patched forward pass and capture selected nodes.
 
-        input_ids = self.tokenize(prompt)
-        logits = self.forward(input_ids)
-
-        self._clear_hooks()
-        self._patch_cache = None
-        self._patch_positions.clear()
-        self._patch_components.clear()
-
-        target_id = self.get_token_id(target_token)
-        last_pos_logits = logits[0, -1, :]
-
-        return last_pos_logits[target_id].item()
+        This supports multi-node interventions and explicit per-node clamping
+        (for example, clamping v to its baseline cache while patching u from
+        clean cache).
+        """
+        return self._run_patched_forward(
+            prompt=prompt,
+            target_token=target_token,
+            patch_cache=patch_cache,
+            patch_nodes=patch_nodes,
+            capture_nodes=capture_nodes,
+            clamp_cache=clamp_cache,
+            clamp_nodes=clamp_nodes,
+        )
 
     def get_num_layers(self) -> int:
         """Return the number of transformer layers."""
