@@ -16,6 +16,7 @@ from pig.causal import (
     mediation_score,
     necessity_score,
     restoration_fraction,
+    split_discovery_evaluation_tensors,
 )
 from pig.model import create_model
 from pig.patching import (
@@ -27,12 +28,12 @@ from pig.patching import (
 from pig.prompts import PromptPair, SliceLabel, create_ioi_dataset
 
 
-def _prompt_pair(index: int = 0) -> PromptPair:
+def _prompt_pair(index: int = 0, corruption: str = "name_swap") -> PromptPair:
     return PromptPair(
         x_cln=f"clean-{index}",
         x_crp=f"corrupt-{index}",
         y_star="target",
-        slice_label=SliceLabel(task="ioi", corruption="name_swap"),
+        slice_label=SliceLabel(task="ioi", corruption=corruption),
         meta={},
     )
 
@@ -43,11 +44,12 @@ def _modern_tensor(
     model_fingerprint: str,
     component_axis: list[ComponentSpec],
     index: int = 0,
+    corruption: str = "name_swap",
 ) -> PatchEffectTensor:
     return PatchEffectTensor(
         effects=np.ones((2, 3, len(component_axis)), dtype=np.float32),
         component_axis=component_axis,
-        prompt_pair=_prompt_pair(index=index),
+        prompt_pair=_prompt_pair(index=index, corruption=corruption),
         base_score=-1.0,
         clean_score=1.0,
         cache_schema_version=PATCH_CACHE_SCHEMA_VERSION,
@@ -263,6 +265,61 @@ def test_load_cached_patch_effect_tensors_accepts_legacy_with_flag(tmp_path):
     assert len(tensors) == 1
     assert tensors[0].is_legacy_cache_entry is True
     assert stats["accepted_legacy_tensors"] == 1
+
+
+def test_split_discovery_evaluation_tensors_stratified_and_disjoint():
+    axis_4 = [ComponentSpec(node_type="att", head=head) for head in range(4)]
+    tensors = [
+        _modern_tensor(
+            model_name="toy_transformer",
+            model_fingerprint="toy_fp",
+            component_axis=axis_4,
+            index=1,
+            corruption="name_swap",
+        ),
+        _modern_tensor(
+            model_name="toy_transformer",
+            model_fingerprint="toy_fp",
+            component_axis=axis_4,
+            index=2,
+            corruption="name_swap",
+        ),
+        _modern_tensor(
+            model_name="toy_transformer",
+            model_fingerprint="toy_fp",
+            component_axis=axis_4,
+            index=3,
+            corruption="abba",
+        ),
+        _modern_tensor(
+            model_name="toy_transformer",
+            model_fingerprint="toy_fp",
+            component_axis=axis_4,
+            index=4,
+            corruption="abba",
+        ),
+    ]
+
+    discovery, evaluation, stats = split_discovery_evaluation_tensors(
+        tensors,
+        max_total_examples=4,
+        seed=42,
+        discovery_fraction=0.5,
+        return_stats=True,
+    )
+
+    assert len(discovery) == 2
+    assert len(evaluation) == 2
+    discovery_ids = {tensor.prompt_pair.x_cln for tensor in discovery}
+    evaluation_ids = {tensor.prompt_pair.x_cln for tensor in evaluation}
+    assert discovery_ids.isdisjoint(evaluation_ids)
+
+    discovery_corruptions = {tensor.prompt_pair.slice_label.corruption for tensor in discovery}
+    evaluation_corruptions = {tensor.prompt_pair.slice_label.corruption for tensor in evaluation}
+    assert discovery_corruptions == {"name_swap", "abba"}
+    assert evaluation_corruptions == {"name_swap", "abba"}
+    assert stats["selected_discovery_count"] == 2
+    assert stats["selected_evaluation_count"] == 2
 
 
 @pytest.mark.slow

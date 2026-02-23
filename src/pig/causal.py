@@ -9,7 +9,7 @@ This module implements an MVP causal evaluation stack with three levels:
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 import json
 import sys
 from dataclasses import asdict, dataclass, field
@@ -387,6 +387,158 @@ def select_causal_subset_from_cache(
     if return_stats:
         return selected, stats
     return selected
+
+
+def _slice_stratum_id(tensor: PatchEffectTensor) -> str:
+    label = tensor.prompt_pair.slice_label
+    return f"{label.task}:{label.corruption}"
+
+
+def split_discovery_evaluation_tensors(
+    tensors: Sequence[PatchEffectTensor],
+    *,
+    max_total_examples: int,
+    seed: int = 42,
+    discovery_fraction: float = 0.5,
+    return_stats: bool = False,
+) -> (
+    tuple[list[PatchEffectTensor], list[PatchEffectTensor]]
+    | tuple[list[PatchEffectTensor], list[PatchEffectTensor], dict]
+):
+    """Create disjoint discovery/evaluation subsets with slice-stratified pools."""
+    stats: dict[str, object] = {
+        "input_tensors": len(tensors),
+        "max_total_examples": int(max_total_examples),
+        "discovery_fraction": float(discovery_fraction),
+        "seed": int(seed),
+        "stratified_by": "slice_label.task+corruption",
+        "strata_counts": {},
+        "discovery_pool_count": 0,
+        "evaluation_pool_count": 0,
+        "selected_discovery_count": 0,
+        "selected_evaluation_count": 0,
+    }
+    if max_total_examples <= 1 or len(tensors) <= 1:
+        stats["error"] = (
+            "Need at least 2 eligible tensors and max_total_examples > 1 "
+            "for disjoint discovery/evaluation split."
+        )
+        if return_stats:
+            return [], [], stats
+        return [], []
+
+    bounded_fraction = float(np.clip(discovery_fraction, 0.1, 0.9))
+    sorted_tensors = sorted(
+        tensors,
+        key=lambda t: (
+            str(t.prompt_pair.slice_label),
+            t.prompt_pair.x_cln,
+            t.prompt_pair.x_crp,
+            t.prompt_pair.y_star,
+        ),
+    )
+    strata: dict[str, list[PatchEffectTensor]] = defaultdict(list)
+    for tensor in sorted_tensors:
+        strata[_slice_stratum_id(tensor)].append(tensor)
+
+    rng = np.random.default_rng(seed)
+    discovery_pool: list[PatchEffectTensor] = []
+    evaluation_pool: list[PatchEffectTensor] = []
+    strata_counts: dict[str, dict[str, int]] = {}
+    for stratum_id in sorted(strata):
+        group = strata[stratum_id]
+        permuted = list(rng.permutation(len(group)))
+        shuffled_group = [group[i] for i in permuted]
+        if len(group) == 1:
+            # Keep singleton strata balanced between pools when possible.
+            send_to_discovery = len(discovery_pool) <= len(evaluation_pool)
+            if send_to_discovery:
+                discovery_pool.append(shuffled_group[0])
+                disc_count = 1
+                eval_count = 0
+            else:
+                evaluation_pool.append(shuffled_group[0])
+                disc_count = 0
+                eval_count = 1
+        else:
+            disc_count = int(round(len(group) * bounded_fraction))
+            disc_count = max(1, min(disc_count, len(group) - 1))
+            eval_count = len(group) - disc_count
+            discovery_pool.extend(shuffled_group[:disc_count])
+            evaluation_pool.extend(shuffled_group[disc_count:])
+        strata_counts[stratum_id] = {
+            "total": len(group),
+            "discovery_pool": disc_count,
+            "evaluation_pool": eval_count,
+        }
+
+    if not discovery_pool and len(evaluation_pool) > 1:
+        discovery_pool.append(evaluation_pool.pop())
+    if not evaluation_pool and len(discovery_pool) > 1:
+        evaluation_pool.append(discovery_pool.pop())
+
+    stats["strata_counts"] = strata_counts
+    stats["discovery_pool_count"] = len(discovery_pool)
+    stats["evaluation_pool_count"] = len(evaluation_pool)
+    if not discovery_pool or not evaluation_pool:
+        stats["error"] = (
+            "Unable to create non-empty disjoint discovery/evaluation pools. "
+            "Increase cached examples across slices/corruptions."
+        )
+        if return_stats:
+            return [], [], stats
+        return [], []
+
+    target_total = min(int(max_total_examples), len(sorted_tensors))
+    target_discovery = max(1, int(round(target_total * bounded_fraction)))
+    target_discovery = min(target_discovery, len(discovery_pool), target_total - 1)
+    target_evaluation = target_total - target_discovery
+    if target_evaluation <= 0:
+        target_evaluation = 1
+        target_discovery = min(len(discovery_pool), target_total - 1)
+
+    if target_evaluation > len(evaluation_pool):
+        deficit = target_evaluation - len(evaluation_pool)
+        target_evaluation = len(evaluation_pool)
+        target_discovery = min(len(discovery_pool), target_discovery + deficit)
+
+    if target_discovery > len(discovery_pool):
+        deficit = target_discovery - len(discovery_pool)
+        target_discovery = len(discovery_pool)
+        target_evaluation = min(len(evaluation_pool), target_evaluation + deficit)
+
+    while target_discovery + target_evaluation < target_total:
+        if len(discovery_pool) - target_discovery >= len(evaluation_pool) - target_evaluation:
+            if target_discovery < len(discovery_pool):
+                target_discovery += 1
+                continue
+        if target_evaluation < len(evaluation_pool):
+            target_evaluation += 1
+            continue
+        break
+
+    if target_discovery <= 0 or target_evaluation <= 0:
+        stats["error"] = (
+            "Unable to sample non-empty disjoint discovery/evaluation subsets. "
+            "Increase --num-examples and cached examples."
+        )
+        if return_stats:
+            return [], [], stats
+        return [], []
+
+    discovery_indices = np.sort(
+        rng.choice(len(discovery_pool), size=target_discovery, replace=False)
+    )
+    evaluation_indices = np.sort(
+        rng.choice(len(evaluation_pool), size=target_evaluation, replace=False)
+    )
+    discovery_subset = [discovery_pool[int(idx)] for idx in discovery_indices]
+    evaluation_subset = [evaluation_pool[int(idx)] for idx in evaluation_indices]
+    stats["selected_discovery_count"] = len(discovery_subset)
+    stats["selected_evaluation_count"] = len(evaluation_subset)
+    if return_stats:
+        return discovery_subset, evaluation_subset, stats
+    return discovery_subset, evaluation_subset
 
 
 def propose_causal_edge_candidates(
