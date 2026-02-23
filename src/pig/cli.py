@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import contextlib
 import os
 import subprocess
@@ -55,6 +56,28 @@ def _resolve_cache_dir(model_name: str, cache_dir: str | None) -> str:
     if cache_dir:
         return cache_dir
     return str(default_patch_cache_dir(model_name))
+
+
+def _resolve_component_size_validation(
+    requested_component_size: int | None,
+    *,
+    expected_component_axis_size: int,
+    model_name: str,
+    node_types: list[str],
+) -> tuple[int, bool]:
+    """Resolve component-size validation and reject incompatible explicit values."""
+    if requested_component_size is None:
+        return expected_component_axis_size, False
+    if requested_component_size != expected_component_axis_size:
+        node_types_label = ",".join(node_types) if node_types else "<none>"
+        raise ValueError(
+            "Incompatible --component-size value. "
+            f"Received {requested_component_size}, but expected "
+            f"{expected_component_axis_size} for model={model_name!r} "
+            f"and node_types={node_types_label!r}. "
+            "Remove --component-size to auto-derive it."
+        )
+    return requested_component_size, True
 
 
 @contextlib.contextmanager
@@ -473,7 +496,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--causal-num-examples",
         type=int,
         default=20,
-        help="Number of examples for causal-eval subset",
+        help=(
+            "Total examples used for disjoint discovery/evaluation split in causal-eval"
+        ),
     )
     pipeline_parser.add_argument(
         "--causal-num-edges",
@@ -492,7 +517,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Deprecated validation-only check for component-axis size. "
-            "Not used as primary cache filter."
+            "If omitted, it is auto-derived from --model-name and --causal-node-types. "
+            "If provided and mismatched, causal-eval fails explicitly."
         ),
     )
     pipeline_parser.add_argument(
@@ -669,7 +695,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--num-examples",
         type=int,
         default=20,
-        help="Subset size for prompt-pair evaluation",
+        help=(
+            "Total examples used for disjoint discovery/evaluation split "
+            "(evaluation runs on a strict subset)"
+        ),
     )
     causal_parser.add_argument(
         "--num-edges",
@@ -688,7 +717,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Deprecated validation-only check for component-axis size. "
-            "Strict cache filtering uses model+axis fingerprints."
+            "If omitted, it is auto-derived from --model-name and --node-types. "
+            "If provided and mismatched, causal-eval fails explicitly."
         ),
     )
     causal_parser.add_argument(
@@ -829,6 +859,7 @@ def main() -> None:
             load_cached_patch_effect_tensors,
             propose_causal_edge_candidates,
             select_causal_subset_from_cache,
+            split_discovery_evaluation_tensors,
         )
         from pig.model import create_model
 
@@ -843,11 +874,6 @@ def main() -> None:
                     "[WARN] --allow-legacy-cache enabled: legacy tensors without "
                     "modern metadata may be reused."
                 )
-            if args.component_size is not None:
-                print(
-                    "[WARN] --component-size is deprecated and only used as "
-                    "validation, not as primary cache filter."
-                )
             print(
                 "Starting causal-eval "
                 f"(model={args.model_name}, examples={args.num_examples}, edges={args.num_edges})"
@@ -860,6 +886,29 @@ def main() -> None:
                 node_types=node_types,
                 num_heads=model.n_heads,
             )
+            expected_component_axis_size = len(expected_component_axis)
+            try:
+                component_size_validation, uses_explicit_component_size = (
+                    _resolve_component_size_validation(
+                        args.component_size,
+                        expected_component_axis_size=expected_component_axis_size,
+                        model_name=args.model_name,
+                        node_types=node_types,
+                    )
+                )
+            except ValueError as exc:
+                print(f"[FAIL] {exc}")
+                raise SystemExit(2)
+            if uses_explicit_component_size:
+                print(
+                    "[WARN] --component-size is deprecated and only used as "
+                    "validation, not as primary cache filter."
+                )
+            else:
+                print(
+                    "[INFO] Auto-derived component-size validation from model+axis: "
+                    f"{component_size_validation}"
+                )
             expected_model_fingerprint = build_model_fingerprint(model)
             expected_axis_fingerprint = build_axis_fingerprint(expected_component_axis)
 
@@ -869,18 +918,19 @@ def main() -> None:
                 expected_model_fingerprint=expected_model_fingerprint,
                 expected_axis_fingerprint=expected_axis_fingerprint,
                 allow_legacy_cache=args.allow_legacy_cache,
-                component_size=args.component_size,
+                component_size=component_size_validation,
                 return_stats=True,
             )
             tensors, cache_filter_stats = tensors_result
-            subset, subset_filter_stats = select_causal_subset_from_cache(
+            eligible_tensors, subset_filter_stats = select_causal_subset_from_cache(
                 tensors,
-                num_examples=args.num_examples,
+                num_examples=len(tensors),
+                component_size=component_size_validation,
                 seed=args.seed,
                 require_clean_better=True,
                 return_stats=True,
             )
-            if not subset:
+            if not eligible_tensors:
                 print(
                     "[FAIL] No eligible cached tensors found after strict cache filtering. "
                     "Regenerate cache for this model/eje with `pig viewer-cache`."
@@ -888,9 +938,32 @@ def main() -> None:
                 print(f"[INFO] Cache filter stats: {cache_filter_stats}")
                 print(f"[INFO] Subset filter stats: {subset_filter_stats}")
                 raise SystemExit(1)
+            (
+                discovery_subset,
+                evaluation_subset,
+                split_stats,
+            ) = split_discovery_evaluation_tensors(
+                eligible_tensors,
+                max_total_examples=args.num_examples,
+                seed=args.seed,
+                discovery_fraction=0.5,
+                return_stats=True,
+            )
+            if not discovery_subset or not evaluation_subset:
+                print(
+                    "[FAIL] Could not create disjoint discovery/evaluation subsets. "
+                    "Increase --num-examples and/or rebuild cache with more examples."
+                )
+                print(f"[INFO] Discovery/evaluation split stats: {split_stats}")
+                raise SystemExit(1)
+            print(
+                "[INFO] Causal split: "
+                f"discovery={len(discovery_subset)} evaluation={len(evaluation_subset)} "
+                f"from eligible={len(eligible_tensors)}"
+            )
 
             candidates = propose_causal_edge_candidates(
-                subset,
+                discovery_subset,
                 num_edges=args.num_edges,
                 node_types=tuple(node_types),
                 enforce_direction=True,
@@ -900,7 +973,7 @@ def main() -> None:
                 print("[FAIL] No edge candidates were proposed")
                 raise SystemExit(1)
 
-            prompt_pairs = [tensor.prompt_pair for tensor in subset]
+            prompt_pairs = [tensor.prompt_pair for tensor in evaluation_subset]
             config = CausalEvalConfig(
                 eps=args.eps,
                 bootstrap_samples=args.bootstrap_samples,
@@ -917,20 +990,45 @@ def main() -> None:
                 progress_desc="causal-eval",
                 progress_file=sys.__stderr__,
             )
+            discovery_slice_counts = dict(
+                sorted(
+                    Counter(
+                        str(t.prompt_pair.slice_label) for t in discovery_subset
+                    ).items()
+                )
+            )
+            evaluation_slice_counts = dict(
+                sorted(
+                    Counter(
+                        str(t.prompt_pair.slice_label) for t in evaluation_subset
+                    ).items()
+                )
+            )
             result.run_metadata.update(
                 {
                     "cache_dir": cache_dir,
                     "output_dir": args.output_dir,
                     "log_path": str(log_path),
-                    "component_size_validation": args.component_size,
-                    "component_size_validation_deprecated": args.component_size
-                    is not None,
+                    "component_size_validation": component_size_validation,
+                    "component_size_validation_source": (
+                        "explicit_cli"
+                        if uses_explicit_component_size
+                        else "derived_model_and_node_types"
+                    ),
+                    "component_size_validation_deprecated": uses_explicit_component_size,
+                    "requested_component_size": args.component_size,
                     "allow_legacy_cache": args.allow_legacy_cache,
                     "expected_model_fingerprint": expected_model_fingerprint,
                     "expected_axis_fingerprint": expected_axis_fingerprint,
-                    "expected_component_axis_size": len(expected_component_axis),
+                    "expected_component_axis_size": expected_component_axis_size,
                     "cache_filter_stats": cache_filter_stats,
                     "subset_filter_stats": subset_filter_stats,
+                    "discovery_evaluation_split": split_stats,
+                    "eligible_tensor_count": len(eligible_tensors),
+                    "discovery_tensor_count": len(discovery_subset),
+                    "evaluation_tensor_count": len(evaluation_subset),
+                    "discovery_slice_counts": discovery_slice_counts,
+                    "evaluation_slice_counts": evaluation_slice_counts,
                     "requested_node_types": node_types,
                 }
             )

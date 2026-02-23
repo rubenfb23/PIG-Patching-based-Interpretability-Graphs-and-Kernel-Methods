@@ -35,27 +35,70 @@ def test_cli_causal_eval_help(capsys):
 
 def test_cli_causal_eval_short_run_with_mocks(monkeypatch, tmp_path):
     out_dir = tmp_path / "causal_out"
-    prompt_pair = PromptPair(
+    prompt_pair_discovery = PromptPair(
         x_cln="John gave the book to Mary . Mary gave it back to",
         x_crp="Mary gave the book to Mary . Mary gave it back to",
         y_star="John",
         slice_label=SliceLabel(task="ioi", corruption="name_swap"),
         meta={},
     )
+    prompt_pair_evaluation = PromptPair(
+        x_cln="Alice gave the book to Bob . Bob gave it back to",
+        x_crp="Bob gave the book to Bob . Bob gave it back to",
+        y_star="Alice",
+        slice_label=SliceLabel(task="ioi", corruption="abba"),
+        meta={},
+    )
 
     def fake_load_cached_patch_effect_tensors(**kwargs):
         _ = kwargs
-        return ([SimpleNamespace(prompt_pair=prompt_pair, clean_score=1.0, base_score=0.0)], {})
+        return (
+            [
+                SimpleNamespace(
+                    prompt_pair=prompt_pair_discovery,
+                    clean_score=1.0,
+                    base_score=0.0,
+                ),
+                SimpleNamespace(
+                    prompt_pair=prompt_pair_evaluation,
+                    clean_score=1.0,
+                    base_score=0.0,
+                ),
+            ],
+            {},
+        )
 
     def fake_select_causal_subset_from_cache(
         tensors,
         num_examples,
+        component_size,
         seed,
         require_clean_better,
         return_stats,
     ):
-        _ = (tensors, num_examples, seed, require_clean_better, return_stats)
-        return [SimpleNamespace(prompt_pair=prompt_pair)], {"selected_count": 1}
+        _ = (
+            tensors,
+            num_examples,
+            component_size,
+            seed,
+            require_clean_better,
+            return_stats,
+        )
+        return list(tensors), {"selected_count": len(tensors)}
+
+    def fake_split_discovery_evaluation_tensors(
+        tensors,
+        max_total_examples,
+        seed,
+        discovery_fraction,
+        return_stats,
+    ):
+        _ = (max_total_examples, seed, discovery_fraction, return_stats)
+        return (
+            [tensors[0]],
+            [tensors[1]],
+            {"selected_discovery_count": 1, "selected_evaluation_count": 1},
+        )
 
     def fake_propose_causal_edge_candidates(tensors, num_edges, node_types, enforce_direction, eps):
         _ = (tensors, num_edges, node_types, enforce_direction, eps)
@@ -80,6 +123,8 @@ def test_cli_causal_eval_short_run_with_mocks(monkeypatch, tmp_path):
         _ = (model, prompt_pairs, candidates)
         _ = kwargs
         assert isinstance(config, CausalEvalConfig)
+        assert len(prompt_pairs) == 1
+        assert prompt_pairs[0].x_cln == prompt_pair_evaluation.x_cln
         arrays = {
             "edge_ids": np.asarray(["e1"], dtype=np.str_),
             "src_labels": np.asarray(["L0T0.att[0]"], dtype=np.str_),
@@ -116,6 +161,11 @@ def test_cli_causal_eval_short_run_with_mocks(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         causal,
+        "split_discovery_evaluation_tensors",
+        fake_split_discovery_evaluation_tensors,
+    )
+    monkeypatch.setattr(
+        causal,
         "propose_causal_edge_candidates",
         fake_propose_causal_edge_candidates,
     )
@@ -132,7 +182,7 @@ def test_cli_causal_eval_short_run_with_mocks(monkeypatch, tmp_path):
             "--output-dir",
             str(out_dir),
             "--num-examples",
-            "1",
+            "2",
             "--num-edges",
             "1",
         ],
@@ -154,10 +204,17 @@ def test_cli_causal_eval_ignores_other_model_tensors_in_shared_cache(
     axis_4 = [ComponentSpec(node_type="att", head=head) for head in range(4)]
 
     toy_prompt = PromptPair(
-        x_cln="toy-clean",
-        x_crp="toy-corrupt",
+        x_cln="toy-clean-1",
+        x_crp="toy-corrupt-1",
         y_star="target",
         slice_label=SliceLabel(task="ioi", corruption="name_swap"),
+        meta={},
+    )
+    toy_prompt_2 = PromptPair(
+        x_cln="toy-clean-2",
+        x_crp="toy-corrupt-2",
+        y_star="target",
+        slice_label=SliceLabel(task="ioi", corruption="abba"),
         meta={},
     )
     gpt_prompt = PromptPair(
@@ -185,8 +242,12 @@ def test_cli_causal_eval_ignores_other_model_tensors_in_shared_cache(
         )
 
     toy_tensor = make_tensor(toy_prompt, "toy_transformer", "toy_fp")
+    toy_tensor_2 = make_tensor(toy_prompt_2, "toy_transformer", "toy_fp")
     gpt_tensor = make_tensor(gpt_prompt, "gpt2", "gpt2_fp")
     (shared_cache / "toy.json").write_text(json.dumps(toy_tensor.to_dict()), encoding="utf-8")
+    (shared_cache / "toy_2.json").write_text(
+        json.dumps(toy_tensor_2.to_dict()), encoding="utf-8"
+    )
     (shared_cache / "gpt.json").write_text(json.dumps(gpt_tensor.to_dict()), encoding="utf-8")
 
     def fake_create_model(model_name, device):
@@ -194,11 +255,13 @@ def test_cli_causal_eval_ignores_other_model_tensors_in_shared_cache(
         return SimpleNamespace(n_heads=4, model_name="toy_transformer")
 
     captured_prompt_pairs: dict[str, list[PromptPair]] = {}
+    captured_discovery_pairs: dict[str, list[PromptPair]] = {}
 
     def fake_propose_causal_edge_candidates(
         tensors, num_edges, node_types, enforce_direction, eps
     ):
-        _ = (tensors, num_edges, node_types, enforce_direction, eps)
+        _ = (num_edges, node_types, enforce_direction, eps)
+        captured_discovery_pairs["pairs"] = [tensor.prompt_pair for tensor in tensors]
         return [
             CausalEdgeCandidate(
                 src_layer=0,
@@ -270,11 +333,64 @@ def test_cli_causal_eval_ignores_other_model_tensors_in_shared_cache(
 
     assert exc.value.code == 0
     assert len(captured_prompt_pairs["pairs"]) == 1
-    assert captured_prompt_pairs["pairs"][0].x_cln == toy_prompt.x_cln
+    assert len(captured_discovery_pairs["pairs"]) == 1
+    assert captured_prompt_pairs["pairs"][0].x_cln != gpt_prompt.x_cln
+    assert captured_discovery_pairs["pairs"][0].x_cln != gpt_prompt.x_cln
+    assert captured_prompt_pairs["pairs"][0].x_cln != captured_discovery_pairs["pairs"][0].x_cln
 
     run_payload = json.loads((out_dir / "causal_eval.json").read_text(encoding="utf-8"))
+    run_metadata = run_payload["run_metadata"]
     reasons = run_payload["run_metadata"]["cache_filter_stats"]["discard_reasons"]
     assert reasons["model_name_mismatch"] == 1
+    assert run_metadata["discovery_tensor_count"] == 1
+    assert run_metadata["evaluation_tensor_count"] == 1
+    assert run_metadata["discovery_evaluation_split"]["selected_discovery_count"] == 1
+    assert run_metadata["discovery_evaluation_split"]["selected_evaluation_count"] == 1
+
+
+def test_cli_causal_eval_fails_on_component_size_mismatch(monkeypatch, tmp_path):
+    out_dir = tmp_path / "causal_out"
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    load_called = {"value": False}
+
+    def fake_create_model(model_name, device):
+        _ = (model_name, device)
+        return SimpleNamespace(n_heads=4, model_name="toy_transformer")
+
+    def fake_load_cached_patch_effect_tensors(**kwargs):
+        _ = kwargs
+        load_called["value"] = True
+        return ([], {})
+
+    monkeypatch.setattr(model_mod, "create_model", fake_create_model)
+    monkeypatch.setattr(causal, "load_cached_patch_effect_tensors", fake_load_cached_patch_effect_tensors)
+    monkeypatch.setattr(cli, "_scripts_dir", lambda: tmp_path / "missing_scripts")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "pig",
+            "causal-eval",
+            "--model-name",
+            "toy_transformer",
+            "--cache-dir",
+            str(cache_dir),
+            "--output-dir",
+            str(out_dir),
+            "--component-size",
+            "14",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 2
+    assert load_called["value"] is False
+    log_text = (out_dir / "causal_eval.log").read_text(encoding="utf-8")
+    assert "Incompatible --component-size value" in log_text
+    assert "expected 4" in log_text
 
 
 def test_cli_pipeline_forwards_causal_flags(monkeypatch):
