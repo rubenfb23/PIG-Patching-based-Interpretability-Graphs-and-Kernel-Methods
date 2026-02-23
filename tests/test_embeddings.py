@@ -216,6 +216,70 @@ class TestWLEmbeddingCache:
             assert cached.num_graphs == fm.num_graphs
             assert cached.num_features == fm.num_features
 
+    def test_cache_key_changes_with_graph_content(
+        self, sample_graph, sample_graph2
+    ):
+        """Cache key must include full graph structure/weights, not only counts."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = WLEmbeddingCache(tmpdir)
+            graphs_a = [sample_graph, sample_graph2]
+
+            modified_edges = [
+                Edge(src=0, dst=3, weight=0.81),  # same endpoints, different weight
+                Edge(src=1, dst=4, weight=0.6),
+                Edge(src=2, dst=5, weight=0.4),
+                Edge(src=4, dst=0, weight=0.3),  # reversed direction vs sample_graph
+            ]
+            modified_graph = PatchInfluenceGraph(
+                nodes=sample_graph.nodes,
+                edges=modified_edges,
+                slice_label=sample_graph.slice_label,
+                num_layers=sample_graph.num_layers,
+                num_tokens=sample_graph.num_tokens,
+            )
+            graphs_b = [modified_graph, sample_graph2]
+
+            assert cache._compute_key(graphs_a, depth=2) != cache._compute_key(
+                graphs_b, depth=2
+            )
+
+    def test_get_returns_none_for_different_graph_content(
+        self, sample_graph, sample_graph2
+    ):
+        """Cache retrieval must fail-closed when graph content differs."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = WLEmbeddingCache(tmpdir)
+            depth = 2
+            graphs_a = [sample_graph, sample_graph2]
+
+            encoder = WLEncoder(depth=depth)
+            embeddings = encoder.encode_batch(graphs_a)
+            all_features = set()
+            for emb in embeddings:
+                all_features.update(emb.features.keys())
+            fm = WLFeatureMatrix(
+                embeddings=embeddings,
+                vocabulary=sorted(all_features),
+                slice_labels=[g.slice_label for g in graphs_a],
+            )
+            cache.put(fm, graphs_a, depth)
+
+            altered_graph = PatchInfluenceGraph(
+                nodes=sample_graph.nodes,
+                edges=[
+                    Edge(src=0, dst=3, weight=0.8),
+                    Edge(src=1, dst=5, weight=0.6),  # changed destination
+                    Edge(src=2, dst=4, weight=0.4),  # changed destination
+                    Edge(src=0, dst=4, weight=0.3),
+                ],
+                slice_label=sample_graph.slice_label,
+                num_layers=sample_graph.num_layers,
+                num_tokens=sample_graph.num_tokens,
+            )
+
+            cached = cache.get([altered_graph, sample_graph2], depth)
+            assert cached is None
+
 
 class TestComputeWLFeatures:
     """Tests for compute_wl_features function."""

@@ -249,6 +249,8 @@ class WLFeatureMatrix:
 class WLEmbeddingCache:
     """Cache for WL embeddings."""
 
+    CACHE_KEY_SCHEMA_VERSION = 2
+
     def __init__(self, cache_dir: Path | str = ".cache/wl_embeddings"):
         """Initialize the cache.
 
@@ -258,17 +260,56 @@ class WLEmbeddingCache:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
+    def _node_key(self, graph: PatchInfluenceGraph, node_idx: int) -> tuple:
+        node = graph.nodes[node_idx]
+        return (
+            int(node.layer),
+            int(node.token),
+            str(node.node_type),
+            None if node.head is None else int(node.head),
+        )
+
+    def _canonical_graph_payload(self, graph: PatchInfluenceGraph) -> dict:
+        """Build canonical graph content for cache hashing."""
+        nodes = sorted(self._node_key(graph, idx) for idx in range(graph.num_nodes))
+
+        edges = sorted(
+            (
+                self._node_key(graph, edge.src),
+                self._node_key(graph, edge.dst),
+                float(edge.weight).hex(),
+            )
+            for edge in graph.edges
+        )
+
+        return {
+            "slice_label": {
+                "task": graph.slice_label.task,
+                "corruption": graph.slice_label.corruption,
+            },
+            "num_layers": int(graph.num_layers),
+            "num_tokens": int(graph.num_tokens),
+            "nodes": nodes,
+            "edges": edges,
+            "directed": True,
+        }
+
     def _compute_key(
         self, graphs: list[PatchInfluenceGraph], depth: int
     ) -> str:
         """Compute cache key from graphs and parameters."""
-        # Hash graph structure and parameters
-        content = json.dumps({
-            "slices": [str(g.slice_label) for g in graphs],
-            "num_nodes": [g.num_nodes for g in graphs],
-            "num_edges": [g.num_edges for g in graphs],
-            "depth": depth,
-        }, sort_keys=True)
+        content = json.dumps(
+            {
+                "cache_key_schema_version": self.CACHE_KEY_SCHEMA_VERSION,
+                "depth": int(depth),
+                "graphs": [
+                    self._canonical_graph_payload(graph)
+                    for graph in graphs
+                ],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         return hashlib.sha256(content.encode()).hexdigest()[:16]
 
     def get(
