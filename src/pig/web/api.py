@@ -93,7 +93,7 @@ async def _handle_connection(websocket, service: GraphViewerService) -> None:
                 token_min=message.get("token_min"),
                 token_max=message.get("token_max"),
                 min_abs_weight=float(message.get("min_abs_weight", 0.0)),
-                max_edges=int(message.get("max_edges", 3000)),
+                max_edges=int(message.get("max_edges", 1000)),
             )
             graph_payload = service.filtered_graph(view_filter)
         except (KeyError, TypeError, ValueError) as exc:

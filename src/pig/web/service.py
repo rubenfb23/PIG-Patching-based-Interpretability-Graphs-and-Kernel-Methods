@@ -18,7 +18,7 @@ class ViewerConfig:
 
     top_k: int = 5
     enforce_direction: bool = True
-    max_edges_default: int = 3000
+    max_edges_default: int = 1000
 
 
 def _slice_to_id(slice_label: SliceLabel) -> str:

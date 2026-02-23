@@ -16,7 +16,7 @@ class ViewFilter:
     token_min: Optional[int] = None
     token_max: Optional[int] = None
     min_abs_weight: float = 0.0
-    max_edges: int = 3000
+    max_edges: int = 1000
 
 
 def build_message(message_type: str, **payload: Any) -> dict[str, Any]:
