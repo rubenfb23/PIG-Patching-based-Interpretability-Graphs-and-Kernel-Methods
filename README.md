@@ -70,6 +70,11 @@ If you want to continue even if a stage fails:
 pig pipeline --continue-on-error
 ```
 
+Pipeline logs are versioned by default (one file per run):
+
+- `outputs/pipeline_logs/pipeline_<model>_<utc>.log`
+- Logs are opened in write mode for each run (no cross-run append mixing).
+
 ### Causal A/B/C Evaluation (GPT-2, fast subset)
 
 Run interventional causal evaluation on a small subset from cached patch effects:
@@ -77,6 +82,11 @@ Run interventional causal evaluation on a small subset from cached patch effects
 ```bash
 uv run pig causal-eval --model-name gpt2
 ```
+
+The causal flow now uses a strict disjoint split:
+
+- `discovery` subset: proposes candidate edges
+- `evaluation` subset: evaluates those candidates (no circular reuse)
 
 Default cache location is now model-scoped:
 
@@ -89,6 +99,11 @@ You can also append it to the existing pipeline:
 
 ```bash
 uv run pig pipeline --model-name gpt2 --with-causal-eval
+
+# Forward causal options through pipeline
+uv run pig pipeline --model-name gpt2 --with-causal-eval \
+  --causal-no-require-clean-better \
+  --causal-overwrite
 ```
 
 Common overrides:
@@ -102,6 +117,12 @@ uv run pig causal-eval --num-examples 20 --num-edges 5 --bootstrap-samples 200 -
 
 # If you intentionally need legacy cache entries (no modern metadata)
 uv run pig causal-eval --model-name gpt2 --allow-legacy-cache
+
+# Disable the clean_score > base_score subset filter (for sensitivity analysis)
+uv run pig causal-eval --model-name gpt2 --no-require-clean-better
+
+# Reuse an existing non-empty output directory (explicit opt-in)
+uv run pig causal-eval --model-name gpt2 --output-dir outputs/causal_eval/manual_run --overwrite
 ```
 
 Cache safety policy:
@@ -110,20 +131,33 @@ Cache safety policy:
 - Legacy cache entries without modern metadata are rejected by default (fail-closed).
 - `--component-size` is deprecated and only retained as validation.
 - Use `--cache-dir` only when you intentionally override model-scoped defaults.
+- `--component-size` is auto-derived from `--model-name` + `--node-types` when omitted; incompatible explicit values fail fast.
 
-Outputs are written to `outputs/causal_eval/`:
+Statistical policy in causal output:
 
-- `causal_eval.json`
-- `causal_eval.npz`
-- `quicklook_causal.png`
+- Per-edge p-values are reported with multiple-testing corrections (`FDR/BH` and `Bonferroni`).
+- `run_metadata` includes a `clean_better_filter_report` with side-by-side summaries:
+  - without filter
+  - with `clean_score > base_score` filter
+  - per-slice effect summaries and confidence intervals
+
+Outputs are versioned by default:
+
+- `outputs/causal_eval/<model>_<utc>_seed<seed>/causal_eval.json`
+- `outputs/causal_eval/<model>_<utc>_seed<seed>/causal_eval.npz`
+- `outputs/causal_eval/<model>_<utc>_seed<seed>/quicklook_causal.png`
+- `outputs/causal_eval/<model>_<utc>_seed<seed>/causal_eval.log`
+
+If `--output-dir` points to a non-empty directory, causal eval fails unless `--overwrite` is set.
 
 You can regenerate the quicklook manually:
 
 ```bash
+RUN_DIR=outputs/causal_eval/<model>_<utc>_seed<seed>
 uv run python scripts/plot_causal_eval.py \
-  --json-path outputs/causal_eval/causal_eval.json \
-  --npz-path outputs/causal_eval/causal_eval.npz \
-  --output-path outputs/causal_eval/quicklook_causal.png
+  --json-path "$RUN_DIR/causal_eval.json" \
+  --npz-path "$RUN_DIR/causal_eval.npz" \
+  --output-path "$RUN_DIR/quicklook_causal.png"
 ```
 
 ### Local 4D Graph Viewer (Web)

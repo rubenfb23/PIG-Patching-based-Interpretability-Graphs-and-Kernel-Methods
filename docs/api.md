@@ -86,13 +86,13 @@ A wrapper around HuggingFace transformers with hooks for activation patching.
 #### forward
 
 ```python
-def forward(self, text: str) -> torch.Tensor
+def forward(self, input_ids: Tensor) -> torch.Tensor
 ```
 
 Run forward pass and return logits.
 
 **Parameters:**
-- `text`: Input text string
+- `input_ids`: Token IDs tensor (typically shape `[1, seq_len]`)
 
 **Returns:** Logits tensor of shape `[1, seq_len, vocab_size]`
 
@@ -340,6 +340,13 @@ class PatchEffectTensor:
     prompt_pair: PromptPair
     base_score: float
     clean_score: float
+    cache_schema_version: int = 2
+    model_name: str | None = None
+    model_fingerprint: str | None = None
+    axis_fingerprint: str | None = None
+    node_types: list[str] = field(default_factory=list)
+    created_at_utc: str | None = None
+    is_legacy_cache_entry: bool = False
 ```
 
 Patch effects for a single example.
@@ -427,8 +434,15 @@ class PatchEffectCache(cache_dir: Path | str = ".cache/patch_effects")
 Disk cache for patch effect tensors.
 
 **Methods:**
-- `get(prompt_pair: PromptPair) -> PatchEffectTensor | None`
-- `put(tensor: PatchEffectTensor) -> None`
+- `get(prompt_pair: PromptPair, model_name: str, component_axis: Sequence[ComponentSpec] | None = None) -> PatchEffectTensor | None`
+- `put(tensor: PatchEffectTensor, model_name: str) -> None`
+- `clear() -> int`
+
+Related helpers in `pig.patching`:
+
+- `default_patch_cache_dir(model_name: str, cache_root: Path | str = ".cache/patch_effects") -> Path`
+- `build_model_fingerprint(model: HookedModel) -> str`
+- `build_axis_fingerprint(component_axis: Sequence[ComponentSpec]) -> str`
 
 ### PatchEffectComputer
 
@@ -710,6 +724,10 @@ def compute_wl_features_from_list(
 ```
 
 Compute WL features from a list of `(graph, label)` tuples.
+
+Caching note:
+
+- `WLEmbeddingCache` cache keys are built from a canonical graph payload (nodes, directed edges, edge weights, slice label and shape metadata) plus WL depth and schema version.
 
 ---
 
