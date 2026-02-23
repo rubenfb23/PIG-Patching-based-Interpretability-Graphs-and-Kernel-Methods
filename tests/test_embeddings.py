@@ -243,6 +243,34 @@ class TestWLEmbeddingCache:
                 graphs_b, depth=2
             )
 
+    def test_cache_key_changes_with_node_content(
+        self, sample_graph, sample_graph2
+    ):
+        """Cache key must change when node metadata changes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = WLEmbeddingCache(tmpdir)
+            graphs_a = [sample_graph, sample_graph2]
+
+            modified_nodes = list(sample_graph.nodes)
+            modified_nodes[0] = Node(
+                layer=modified_nodes[0].layer,
+                token=modified_nodes[0].token,
+                node_type="att",
+                head=0,
+            )
+            modified_graph = PatchInfluenceGraph(
+                nodes=modified_nodes,
+                edges=sample_graph.edges,
+                slice_label=sample_graph.slice_label,
+                num_layers=sample_graph.num_layers,
+                num_tokens=sample_graph.num_tokens,
+            )
+            graphs_b = [modified_graph, sample_graph2]
+
+            assert cache._compute_key(graphs_a, depth=2) != cache._compute_key(
+                graphs_b, depth=2
+            )
+
     def test_get_returns_none_for_different_graph_content(
         self, sample_graph, sample_graph2
     ):
