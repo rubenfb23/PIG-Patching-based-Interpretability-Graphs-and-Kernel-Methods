@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import contextlib
+from datetime import datetime, timezone
 import os
+import re
 import subprocess
 import sys
 import time
@@ -58,6 +60,47 @@ def _resolve_cache_dir(model_name: str, cache_dir: str | None) -> str:
     return str(default_patch_cache_dir(model_name))
 
 
+def _model_key(model_name: str) -> str:
+    key = re.sub(r"[^a-zA-Z0-9._-]+", "_", model_name.strip())
+    key = key.strip("._-")
+    return key.lower() or "model"
+
+
+def _utc_run_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _default_causal_output_dir(model_name: str, seed: int) -> Path:
+    return (
+        _repo_root()
+        / "outputs"
+        / "causal_eval"
+        / f"{_model_key(model_name)}_{_utc_run_stamp()}_seed{seed}"
+    )
+
+
+def _default_pipeline_log_path(model_name: str) -> Path:
+    return (
+        _repo_root()
+        / "outputs"
+        / "pipeline_logs"
+        / f"pipeline_{_model_key(model_name)}_{_utc_run_stamp()}.log"
+    )
+
+
+def _ensure_output_dir_ready(output_dir: Path, overwrite: bool) -> None:
+    if output_dir.exists() and not output_dir.is_dir():
+        raise ValueError(f"Output path exists and is not a directory: {output_dir}")
+    if output_dir.exists() and not overwrite:
+        has_files = any(output_dir.iterdir())
+        if has_files:
+            raise ValueError(
+                f"Output directory already exists and is not empty: {output_dir}. "
+                "Use --overwrite to allow replacing artifacts in this directory, "
+                "or pick a new --output-dir."
+            )
+
+
 def _resolve_component_size_validation(
     requested_component_size: int | None,
     *,
@@ -83,7 +126,7 @@ def _resolve_component_size_validation(
 @contextlib.contextmanager
 def _stream_stdio_to_log(log_path: Path):
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(log_path, "a", encoding="utf-8", buffering=1) as log_file:
+    with open(log_path, "w", encoding="utf-8", buffering=1) as log_file:
         with contextlib.redirect_stdout(log_file), contextlib.redirect_stderr(log_file):
             yield log_file
 
@@ -188,13 +231,15 @@ def _run_script(
 def _run_causal_eval_subcommand(
     model_name: str,
     cache_dir: str | None = None,
-    output_dir: str = "outputs/causal_eval",
+    output_dir: str | None = None,
     log_path: str | None = None,
     num_examples: int = 20,
     num_edges: int = 5,
     node_types: str = "att",
     component_size: int | None = None,
     allow_legacy_cache: bool = False,
+    require_clean_better: bool = True,
+    overwrite: bool = False,
     seed: int = 42,
     eps: float = 1e-6,
     bootstrap_samples: int = 200,
@@ -211,8 +256,6 @@ def _run_causal_eval_subcommand(
         model_name,
         "--cache-dir",
         resolved_cache_dir,
-        "--output-dir",
-        output_dir,
         "--num-examples",
         str(num_examples),
         "--num-edges",
@@ -228,10 +271,18 @@ def _run_causal_eval_subcommand(
         "--permutation-samples",
         str(permutation_samples),
     ]
+    if output_dir:
+        command.extend(["--output-dir", output_dir])
     if component_size is not None:
         command.extend(["--component-size", str(component_size)])
     if allow_legacy_cache:
         command.append("--allow-legacy-cache")
+    if require_clean_better:
+        command.append("--require-clean-better")
+    else:
+        command.append("--no-require-clean-better")
+    if overwrite:
+        command.append("--overwrite")
     if log_path:
         command.extend(["--log-path", log_path])
     if device:
@@ -291,13 +342,15 @@ def run_pipeline(
     pipeline_log_path: str | None = None,
     with_causal_eval: bool = False,
     causal_cache_dir: str | None = None,
-    causal_output_dir: str = "outputs/causal_eval",
+    causal_output_dir: str | None = None,
     causal_log_path: str | None = None,
     causal_num_examples: int = 20,
     causal_num_edges: int = 5,
     causal_node_types: str = "att",
     causal_component_size: int | None = None,
     causal_allow_legacy_cache: bool = False,
+    causal_require_clean_better: bool = True,
+    causal_overwrite: bool = False,
     causal_seed: int = 42,
     causal_eps: float = 1e-6,
     causal_bootstrap_samples: int = 200,
@@ -315,7 +368,7 @@ def run_pipeline(
     pipeline_log = (
         Path(pipeline_log_path)
         if pipeline_log_path
-        else (_repo_root() / "outputs" / "pipeline.log")
+        else _default_pipeline_log_path(model_name)
     )
     pipeline_log.parent.mkdir(parents=True, exist_ok=True)
 
@@ -332,7 +385,7 @@ def run_pipeline(
         file=sys.stderr,
     )
 
-    with open(pipeline_log, "a", encoding="utf-8", buffering=1) as log_file:
+    with open(pipeline_log, "w", encoding="utf-8", buffering=1) as log_file:
         _write_log_line(log_file, "=" * 72)
         _write_log_line(
             log_file,
@@ -398,6 +451,8 @@ def run_pipeline(
                 node_types=causal_node_types,
                 component_size=causal_component_size,
                 allow_legacy_cache=causal_allow_legacy_cache,
+                require_clean_better=causal_require_clean_better,
+                overwrite=causal_overwrite,
                 seed=causal_seed,
                 eps=causal_eps,
                 bootstrap_samples=causal_bootstrap_samples,
@@ -467,7 +522,10 @@ def _build_parser() -> argparse.ArgumentParser:
     pipeline_parser.add_argument(
         "--pipeline-log-path",
         default=None,
-        help="Optional pipeline log file path (default: outputs/pipeline.log)",
+        help=(
+            "Optional pipeline log file path "
+            "(default: outputs/pipeline_logs/pipeline_<model>_<utc>.log)"
+        ),
     )
     pipeline_parser.add_argument(
         "--with-causal-eval",
@@ -484,8 +542,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     pipeline_parser.add_argument(
         "--causal-output-dir",
-        default="outputs/causal_eval",
-        help="Output directory for causal-eval artifacts",
+        default=None,
+        help=(
+            "Output directory for causal-eval artifacts. "
+            "Default: outputs/causal_eval/<model>_<utc>_seed<seed>"
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--causal-overwrite",
+        action="store_true",
+        help="Allow causal-eval to reuse a non-empty output directory",
     )
     pipeline_parser.add_argument(
         "--causal-log-path",
@@ -528,6 +594,19 @@ def _build_parser() -> argparse.ArgumentParser:
             "Allow legacy cache entries without modern metadata "
             "(disabled by default; may mix incompatible tensors)."
         ),
+    )
+    pipeline_parser.add_argument(
+        "--causal-require-clean-better",
+        dest="causal_require_clean_better",
+        action="store_true",
+        default=True,
+        help="Keep default filter clean_score > base_score for subset selection",
+    )
+    pipeline_parser.add_argument(
+        "--causal-no-require-clean-better",
+        dest="causal_require_clean_better",
+        action="store_false",
+        help="Disable clean_score > base_score subset filtering",
     )
     pipeline_parser.add_argument(
         "--causal-seed",
@@ -683,8 +762,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     causal_parser.add_argument(
         "--output-dir",
-        default="outputs/causal_eval",
-        help="Directory for causal_eval.json/.npz and quicklook figure",
+        default=None,
+        help=(
+            "Directory for causal_eval.json/.npz and quicklook figure. "
+            "Default: outputs/causal_eval/<model>_<utc>_seed<seed>"
+        ),
+    )
+    causal_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow writing into a non-empty --output-dir",
     )
     causal_parser.add_argument(
         "--log-path",
@@ -730,6 +817,19 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     causal_parser.add_argument(
+        "--require-clean-better",
+        dest="require_clean_better",
+        action="store_true",
+        default=True,
+        help="Keep default filter clean_score > base_score for subset selection",
+    )
+    causal_parser.add_argument(
+        "--no-require-clean-better",
+        dest="require_clean_better",
+        action="store_false",
+        help="Disable clean_score > base_score subset filtering",
+    )
+    causal_parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -769,7 +869,7 @@ def main() -> None:
             pipeline_log_path=getattr(args, "pipeline_log_path", None),
             with_causal_eval=getattr(args, "with_causal_eval", False),
             causal_cache_dir=getattr(args, "causal_cache_dir", None),
-            causal_output_dir=getattr(args, "causal_output_dir", "outputs/causal_eval"),
+            causal_output_dir=getattr(args, "causal_output_dir", None),
             causal_log_path=getattr(args, "causal_log_path", None),
             causal_num_examples=getattr(args, "causal_num_examples", 20),
             causal_num_edges=getattr(args, "causal_num_edges", 5),
@@ -778,6 +878,10 @@ def main() -> None:
             causal_allow_legacy_cache=getattr(
                 args, "causal_allow_legacy_cache", False
             ),
+            causal_require_clean_better=getattr(
+                args, "causal_require_clean_better", True
+            ),
+            causal_overwrite=getattr(args, "causal_overwrite", False),
             causal_seed=getattr(args, "causal_seed", 42),
             causal_eps=getattr(args, "causal_eps", 1e-6),
             causal_bootstrap_samples=getattr(args, "causal_bootstrap_samples", 200),
@@ -855,6 +959,7 @@ def main() -> None:
     if args.command == "causal-eval":
         from pig.causal import (
             CausalEvalConfig,
+            build_clean_better_filter_report,
             evaluate_causal_edges,
             load_cached_patch_effect_tensors,
             propose_causal_edge_candidates,
@@ -863,7 +968,23 @@ def main() -> None:
         )
         from pig.model import create_model
 
-        output_dir = Path(args.output_dir)
+        output_dir = (
+            Path(args.output_dir)
+            if args.output_dir
+            else _default_causal_output_dir(args.model_name, args.seed)
+        )
+        try:
+            _ensure_output_dir_ready(output_dir, overwrite=args.overwrite)
+        except ValueError as exc:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            log_path = (
+                Path(args.log_path)
+                if args.log_path
+                else (output_dir / "causal_eval.log")
+            )
+            with _stream_stdio_to_log(log_path):
+                print(f"[FAIL] {exc}")
+            raise SystemExit(2)
         output_dir.mkdir(parents=True, exist_ok=True)
         log_path = Path(args.log_path) if args.log_path else (output_dir / "causal_eval.log")
         with _stream_stdio_to_log(log_path) as log_file:
@@ -922,12 +1043,24 @@ def main() -> None:
                 return_stats=True,
             )
             tensors, cache_filter_stats = tensors_result
+            filter_sensitivity_report = build_clean_better_filter_report(
+                tensors,
+                bootstrap_samples=args.bootstrap_samples,
+                ci_alpha=0.05,
+                seed=args.seed,
+            )
+            print(
+                "[INFO] clean>base filter sensitivity: "
+                f"input={filter_sensitivity_report['input_tensors']} "
+                f"retained={filter_sensitivity_report['retained_with_filter']} "
+                f"discarded={filter_sensitivity_report['discarded_by_filter']}"
+            )
             eligible_tensors, subset_filter_stats = select_causal_subset_from_cache(
                 tensors,
                 num_examples=len(tensors),
                 component_size=component_size_validation,
                 seed=args.seed,
-                require_clean_better=True,
+                require_clean_better=args.require_clean_better,
                 return_stats=True,
             )
             if not eligible_tensors:
@@ -1007,8 +1140,9 @@ def main() -> None:
             result.run_metadata.update(
                 {
                     "cache_dir": cache_dir,
-                    "output_dir": args.output_dir,
+                    "output_dir": str(output_dir),
                     "log_path": str(log_path),
+                    "overwrite": bool(args.overwrite),
                     "component_size_validation": component_size_validation,
                     "component_size_validation_source": (
                         "explicit_cli"
@@ -1023,6 +1157,7 @@ def main() -> None:
                     "expected_component_axis_size": expected_component_axis_size,
                     "cache_filter_stats": cache_filter_stats,
                     "subset_filter_stats": subset_filter_stats,
+                    "clean_better_filter_report": filter_sensitivity_report,
                     "discovery_evaluation_split": split_stats,
                     "eligible_tensor_count": len(eligible_tensors),
                     "discovery_tensor_count": len(discovery_subset),
@@ -1030,6 +1165,7 @@ def main() -> None:
                     "discovery_slice_counts": discovery_slice_counts,
                     "evaluation_slice_counts": evaluation_slice_counts,
                     "requested_node_types": node_types,
+                    "require_clean_better": bool(args.require_clean_better),
                 }
             )
 

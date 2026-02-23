@@ -193,6 +193,59 @@ def test_cli_causal_eval_short_run_with_mocks(monkeypatch, tmp_path):
     assert exc.value.code == 0
     assert (out_dir / "causal_eval.json").exists()
     assert (out_dir / "causal_eval.npz").exists()
+    payload = json.loads((out_dir / "causal_eval.json").read_text(encoding="utf-8"))
+    report = payload["run_metadata"]["clean_better_filter_report"]
+    assert report["rule"] == "clean_score > base_score"
+    assert report["without_filter"]["n"] >= report["with_filter"]["n"]
+
+
+def test_default_causal_output_dir_is_versioned():
+    output_dir = cli._default_causal_output_dir("toy_transformer", seed=7)
+    assert output_dir.parent.name == "causal_eval"
+    assert output_dir.name.startswith("toy_transformer_")
+    assert output_dir.name.endswith("_seed7")
+
+
+def test_default_pipeline_log_path_is_versioned():
+    log_path = cli._default_pipeline_log_path("toy_transformer")
+    assert log_path.parent.name == "pipeline_logs"
+    assert log_path.name.startswith("pipeline_toy_transformer_")
+    assert log_path.suffix == ".log"
+
+
+def test_cli_causal_eval_rejects_non_empty_output_dir_without_overwrite(
+    monkeypatch, tmp_path
+):
+    out_dir = tmp_path / "causal_out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "existing.json").write_text("{}", encoding="utf-8")
+
+    create_called = {"value": False}
+
+    def fake_create_model(model_name, device):
+        _ = (model_name, device)
+        create_called["value"] = True
+        return SimpleNamespace(n_heads=4, model_name="toy_transformer")
+
+    monkeypatch.setattr(model_mod, "create_model", fake_create_model)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "pig",
+            "causal-eval",
+            "--output-dir",
+            str(out_dir),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 2
+    assert create_called["value"] is False
+    log_text = (out_dir / "causal_eval.log").read_text(encoding="utf-8")
+    assert "--overwrite" in log_text
 
 
 def test_cli_causal_eval_ignores_other_model_tensors_in_shared_cache(
@@ -409,6 +462,8 @@ def test_cli_pipeline_forwards_causal_flags(monkeypatch):
             "pipeline",
             "--with-causal-eval",
             "--causal-build-cache",
+            "--causal-overwrite",
+            "--causal-no-require-clean-better",
             "--causal-num-examples",
             "9",
             "--causal-num-edges",
@@ -422,6 +477,8 @@ def test_cli_pipeline_forwards_causal_flags(monkeypatch):
     assert exc.value.code == 0
     assert captured["with_causal_eval"] is True
     assert captured["causal_build_cache"] is True
+    assert captured["causal_overwrite"] is True
+    assert captured["causal_require_clean_better"] is False
     assert captured["causal_num_examples"] == 9
     assert captured["causal_num_edges"] == 3
 
