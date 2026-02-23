@@ -238,6 +238,164 @@ def _metric_summary(
     }
 
 
+def _fdr_bh_adjust(p_values: Sequence[float]) -> list[float]:
+    """Benjamini-Hochberg FDR adjusted p-values."""
+    if not p_values:
+        return []
+    raw = np.asarray(p_values, dtype=np.float64)
+    m = raw.size
+    order = np.argsort(raw)
+    sorted_p = raw[order]
+    adjusted_sorted = np.empty(m, dtype=np.float64)
+    running_min = 1.0
+    for i in range(m - 1, -1, -1):
+        rank = i + 1
+        candidate = float(sorted_p[i]) * m / rank
+        running_min = min(running_min, candidate)
+        adjusted_sorted[i] = running_min
+    adjusted = np.empty(m, dtype=np.float64)
+    adjusted[order] = np.clip(adjusted_sorted, 0.0, 1.0)
+    return adjusted.tolist()
+
+
+def _bonferroni_adjust(p_values: Sequence[float]) -> list[float]:
+    """Bonferroni adjusted p-values."""
+    if not p_values:
+        return []
+    m = len(p_values)
+    adjusted = [min(float(p) * m, 1.0) for p in p_values]
+    return adjusted
+
+
+def _apply_multiple_testing_corrections(
+    edge_results: list[dict],
+    *,
+    alpha: float = 0.05,
+) -> dict[str, dict[str, int | float]]:
+    """Attach FDR/BH and Bonferroni corrections for edge-wise metric p-values."""
+    metric_paths = {
+        "I": ("level_a", "I"),
+        "R_u": ("level_b", "R_u"),
+        "R_v": ("level_b", "R_v"),
+        "R_uv": ("level_b", "R_uv"),
+        "M": ("level_b", "M"),
+        "R_u_clamp_v": ("level_c", "R_u_clamp_v"),
+        "necessity": ("level_c", "necessity"),
+    }
+    correction_summary: dict[str, dict[str, int | float]] = {}
+    for metric_name, (section, metric_key) in metric_paths.items():
+        valid_indices: list[int] = []
+        raw_p_values: list[float] = []
+        for idx, edge in enumerate(edge_results):
+            summary = edge.get(section, {}).get(metric_key, {})
+            p_value = summary.get("p_value")
+            if p_value is None:
+                continue
+            p_value_float = float(p_value)
+            if not np.isfinite(p_value_float):
+                continue
+            valid_indices.append(idx)
+            raw_p_values.append(p_value_float)
+
+        fdr_adjusted = _fdr_bh_adjust(raw_p_values)
+        bonf_adjusted = _bonferroni_adjust(raw_p_values)
+        for edge_idx, p_fdr, p_bonf in zip(
+            valid_indices, fdr_adjusted, bonf_adjusted
+        ):
+            metric_summary = edge_results[edge_idx][section][metric_key]
+            metric_summary["p_value_fdr_bh"] = float(p_fdr)
+            metric_summary["p_value_bonferroni"] = float(p_bonf)
+            metric_summary["significant_fdr_bh"] = bool(p_fdr <= alpha)
+            metric_summary["significant_bonferroni"] = bool(p_bonf <= alpha)
+
+        correction_summary[metric_name] = {
+            "raw_tests": len(raw_p_values),
+            "alpha": float(alpha),
+            "significant_fdr_bh": int(sum(p <= alpha for p in fdr_adjusted)),
+            "significant_bonferroni": int(sum(p <= alpha for p in bonf_adjusted)),
+        }
+    return correction_summary
+
+
+def summarize_clean_base_effects_by_slice(
+    tensors: Sequence[PatchEffectTensor],
+    *,
+    bootstrap_samples: int = 200,
+    ci_alpha: float = 0.05,
+    seed: int = 42,
+) -> dict:
+    """Summarize clean-base effect deltas overall and by slice."""
+    deltas = [float(t.clean_score - t.base_score) for t in tensors]
+    all_values = np.asarray(deltas, dtype=np.float64)
+    all_values = all_values[np.isfinite(all_values)]
+    mean, ci_low, ci_high = _bootstrap_mean_ci(
+        all_values,
+        samples=bootstrap_samples,
+        alpha=ci_alpha,
+        seed=seed,
+    )
+    summary: dict[str, object] = {
+        "n": int(all_values.size),
+        "mean_clean_minus_base": mean,
+        "ci_low": ci_low,
+        "ci_high": ci_high,
+        "by_slice": {},
+    }
+    grouped: dict[str, list[float]] = defaultdict(list)
+    for tensor in tensors:
+        slice_id = _slice_stratum_id(tensor)
+        grouped[slice_id].append(float(tensor.clean_score - tensor.base_score))
+
+    by_slice: dict[str, dict[str, float | int]] = {}
+    for idx, slice_id in enumerate(sorted(grouped)):
+        values = np.asarray(grouped[slice_id], dtype=np.float64)
+        values = values[np.isfinite(values)]
+        slice_mean, slice_low, slice_high = _bootstrap_mean_ci(
+            values,
+            samples=bootstrap_samples,
+            alpha=ci_alpha,
+            seed=seed + idx + 1,
+        )
+        by_slice[slice_id] = {
+            "n": int(values.size),
+            "mean_clean_minus_base": slice_mean,
+            "ci_low": slice_low,
+            "ci_high": slice_high,
+        }
+    summary["by_slice"] = by_slice
+    return summary
+
+
+def build_clean_better_filter_report(
+    tensors: Sequence[PatchEffectTensor],
+    *,
+    bootstrap_samples: int = 200,
+    ci_alpha: float = 0.05,
+    seed: int = 42,
+) -> dict:
+    """Report clean>base filter sensitivity with and without the filter."""
+    all_tensors = list(tensors)
+    filtered_tensors = [t for t in all_tensors if t.clean_score > t.base_score]
+    return {
+        "rule": "clean_score > base_score",
+        "input_tensors": len(all_tensors),
+        "retained_with_filter": len(filtered_tensors),
+        "discarded_by_filter": len(all_tensors) - len(filtered_tensors),
+        "without_filter": summarize_clean_base_effects_by_slice(
+            all_tensors,
+            bootstrap_samples=bootstrap_samples,
+            ci_alpha=ci_alpha,
+            seed=seed,
+        ),
+        "with_filter": summarize_clean_base_effects_by_slice(
+            filtered_tensors,
+            bootstrap_samples=bootstrap_samples,
+            ci_alpha=ci_alpha,
+            seed=seed + 1000,
+        ),
+    }
+
+
 def load_cached_patch_effect_tensors(
     cache_dir: Path | str = ".cache/patch_effects",
     *,
@@ -875,6 +1033,8 @@ def evaluate_causal_edges(
     if not edge_results:
         raise RuntimeError("No valid causal edges were evaluated")
 
+    multiple_testing = _apply_multiple_testing_corrections(edge_results, alpha=0.05)
+
     arrays: dict[str, NDArray[np.float64] | NDArray[np.str_]] = {
         "edge_ids": np.asarray(edge_ids, dtype=np.str_),
         "src_labels": np.asarray(src_labels, dtype=np.str_),
@@ -899,6 +1059,11 @@ def evaluate_causal_edges(
         "num_edges_evaluated": len(edge_results),
         "num_edges_skipped": skipped_edges,
         "required_node_types": required_node_types,
+        "multiple_testing": {
+            "methods": ["fdr_bh", "bonferroni"],
+            "alpha": 0.05,
+            "metrics": multiple_testing,
+        },
     }
 
     return CausalEvalResult(

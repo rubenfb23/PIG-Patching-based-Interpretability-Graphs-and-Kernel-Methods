@@ -11,6 +11,7 @@ from pig.causal import (
     CausalEdgeCandidate,
     CausalEvalConfig,
     activation_influence_score,
+    build_clean_better_filter_report,
     evaluate_causal_edges,
     load_cached_patch_effect_tensors,
     mediation_score,
@@ -113,6 +114,9 @@ def test_evaluate_causal_edges_toy_smoke(tmp_path):
     assert np.isfinite(edge["level_a"]["I"]["mean"])
     assert np.isfinite(edge["level_b"]["M"]["mean"])
     assert np.isfinite(edge["level_c"]["necessity"]["mean"])
+    assert "p_value_fdr_bh" in edge["level_a"]["I"]
+    assert "p_value_bonferroni" in edge["level_a"]["I"]
+    assert "multiple_testing" in result.run_metadata
 
     json_path = result.save_json(tmp_path / "causal_eval.json")
     npz_path = result.save_npz(tmp_path / "causal_eval.npz")
@@ -265,6 +269,43 @@ def test_load_cached_patch_effect_tensors_accepts_legacy_with_flag(tmp_path):
     assert len(tensors) == 1
     assert tensors[0].is_legacy_cache_entry is True
     assert stats["accepted_legacy_tensors"] == 1
+
+
+def test_build_clean_better_filter_report_includes_with_without_and_slices():
+    axis_4 = [ComponentSpec(node_type="att", head=head) for head in range(4)]
+    tensors = [
+        _modern_tensor(
+            model_name="toy_transformer",
+            model_fingerprint="toy_fp",
+            component_axis=axis_4,
+            index=1,
+            corruption="name_swap",
+        ),
+        _modern_tensor(
+            model_name="toy_transformer",
+            model_fingerprint="toy_fp",
+            component_axis=axis_4,
+            index=2,
+            corruption="abba",
+        ),
+    ]
+    tensors[1].clean_score = -2.0
+    tensors[1].base_score = -1.0
+
+    report = build_clean_better_filter_report(
+        tensors,
+        bootstrap_samples=10,
+        ci_alpha=0.05,
+        seed=7,
+    )
+
+    assert report["input_tensors"] == 2
+    assert report["retained_with_filter"] == 1
+    assert report["discarded_by_filter"] == 1
+    assert report["without_filter"]["n"] == 2
+    assert report["with_filter"]["n"] == 1
+    assert "ioi:name_swap" in report["without_filter"]["by_slice"]
+    assert "ioi:abba" in report["without_filter"]["by_slice"]
 
 
 def test_split_discovery_evaluation_tensors_stratified_and_disjoint():
