@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
@@ -23,9 +25,196 @@ from pig.model import (
     NODE_TYPE_MLP,
     NODE_TYPE_RES,
     ALLOWED_NODE_TYPES,
+    TOY_MODEL_ALIASES,
     HookedModel,
 )
 from pig.prompts import PromptPair, SliceLabel
+
+PATCH_CACHE_SCHEMA_VERSION = 2
+MODEL_FINGERPRINT_VERSION = 1
+AXIS_FINGERPRINT_VERSION = 1
+
+
+def model_cache_key(model_name: str) -> str:
+    """Return a stable directory-safe key for model-scoped caches."""
+    normalized = model_name.strip().lower()
+    if normalized in TOY_MODEL_ALIASES:
+        return "toy_transformer"
+
+    key = model_name.strip().replace("\\", "/")
+    key = re.sub(r"[^a-zA-Z0-9._-]+", "_", key).strip("._-")
+    key = re.sub(r"_+", "_", key)
+    return key.lower() or "unknown_model"
+
+
+def default_patch_cache_dir(
+    model_name: str,
+    cache_root: Path | str = ".cache/patch_effects",
+) -> Path:
+    """Resolve the default cache directory segregated by model."""
+    return Path(cache_root) / model_cache_key(model_name)
+
+
+def _json_fingerprint(payload: dict, chars: int = 24) -> str:
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:chars]
+
+
+def node_types_from_component_axis(
+    component_axis: Sequence[ComponentSpec],
+) -> list[str]:
+    """Extract ordered unique node types from a component axis."""
+    node_types: list[str] = []
+    for spec in component_axis:
+        if spec.node_type not in node_types:
+            node_types.append(spec.node_type)
+    return node_types
+
+
+def build_axis_fingerprint(component_axis: Sequence[ComponentSpec]) -> str:
+    """Build an order-sensitive fingerprint for a component axis."""
+    payload = {
+        "version": AXIS_FINGERPRINT_VERSION,
+        "axis": [
+            {"index": index, "type": spec.node_type, "head": spec.head}
+            for index, spec in enumerate(component_axis)
+        ],
+    }
+    return _json_fingerprint(payload)
+
+
+def _checkpoint_path_signature(identifier: str | None) -> dict:
+    if identifier is None:
+        return {"kind": "missing", "identifier": None}
+
+    value = str(identifier).strip()
+    if not value:
+        return {"kind": "missing", "identifier": value}
+
+    candidate = Path(value).expanduser()
+    if not candidate.exists():
+        return {"kind": "name", "identifier": value}
+
+    resolved = candidate.resolve()
+    if resolved.is_file():
+        stat = resolved.stat()
+        return {
+            "kind": "file",
+            "path": str(resolved),
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+        }
+
+    signature_files: dict[str, Path] = {}
+    for relative_name in (
+        "config.json",
+        "generation_config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+    ):
+        path = resolved / relative_name
+        if path.is_file():
+            signature_files[str(path.relative_to(resolved))] = path
+
+    for pattern in ("*.safetensors", "*.bin", "*.pt", "*.index.json"):
+        for path in resolved.rglob(pattern):
+            if path.is_file():
+                signature_files[str(path.relative_to(resolved))] = path
+            if len(signature_files) >= 256:
+                break
+        if len(signature_files) >= 256:
+            break
+
+    entries = []
+    for relative_name in sorted(signature_files):
+        path = signature_files[relative_name]
+        stat = path.stat()
+        entries.append(
+            {
+                "file": relative_name,
+                "size": int(stat.st_size),
+                "mtime_ns": int(stat.st_mtime_ns),
+            }
+        )
+    return {
+        "kind": "directory",
+        "path": str(resolved),
+        "files": entries,
+    }
+
+
+def _model_architecture_signature(model: HookedModel) -> dict:
+    model_config = getattr(getattr(model, "model", None), "config", None)
+    config_fields = {}
+    if model_config is not None:
+        for key in (
+            "model_type",
+            "architectures",
+            "n_layer",
+            "n_head",
+            "n_embd",
+            "n_positions",
+            "n_ctx",
+            "vocab_size",
+            "max_position_embeddings",
+        ):
+            if hasattr(model_config, key):
+                config_fields[key] = getattr(model_config, key)
+
+    toy_config = getattr(model, "config", None)
+    toy_config_fields = {}
+    if toy_config is not None:
+        for key in ("n_layers", "n_heads", "d_model", "mlp_dim", "vocab_size", "seed"):
+            if hasattr(toy_config, key):
+                toy_config_fields[key] = getattr(toy_config, key)
+
+    return {
+        "class_name": model.__class__.__name__,
+        "n_layers": int(getattr(model, "n_layers", -1)),
+        "n_heads": int(getattr(model, "n_heads", -1)),
+        "d_model": int(getattr(model, "d_model", -1)),
+        "head_dim": int(getattr(model, "head_dim", -1)),
+        "vocab_size": int(getattr(model, "vocab_size", -1)),
+        "max_seq_len": int(getattr(model, "max_seq_len", -1)),
+        "config_fields": config_fields,
+        "toy_config_fields": toy_config_fields,
+    }
+
+
+def build_model_fingerprint(model: HookedModel) -> str:
+    """Build a stable fingerprint for model identity + architecture + checkpoint."""
+    backend_model = getattr(model, "model", None)
+    backend_config = getattr(backend_model, "config", None)
+    identity_candidates = [
+        getattr(model, "model_name", None),
+        getattr(backend_model, "name_or_path", None),
+        getattr(backend_config, "_name_or_path", None),
+    ]
+    unique_candidates = []
+    for value in identity_candidates:
+        if value is None:
+            continue
+        normalized = str(value).strip()
+        if not normalized or normalized in unique_candidates:
+            continue
+        unique_candidates.append(normalized)
+
+    payload = {
+        "version": MODEL_FINGERPRINT_VERSION,
+        "identity": {
+            "model_name": getattr(model, "model_name", None),
+            "backend_class": backend_model.__class__.__name__
+            if backend_model is not None
+            else None,
+            "checkpoint_candidates": unique_candidates,
+        },
+        "architecture": _model_architecture_signature(model),
+        "checkpoints": [
+            _checkpoint_path_signature(candidate) for candidate in unique_candidates
+        ],
+    }
+    return _json_fingerprint(payload)
 
 
 @dataclass(frozen=True)
@@ -86,6 +275,13 @@ class PatchEffectTensor:
     base_score: float
     clean_score: float
     token_labels: list[str] = field(default_factory=list)
+    cache_schema_version: int = PATCH_CACHE_SCHEMA_VERSION
+    model_name: str | None = None
+    model_fingerprint: str | None = None
+    axis_fingerprint: str | None = None
+    node_types: list[str] = field(default_factory=list)
+    created_at_utc: str | None = None
+    is_legacy_cache_entry: bool = False
 
     @property
     def num_layers(self) -> int:
@@ -135,12 +331,20 @@ class PatchEffectTensor:
     def to_dict(self) -> dict:
         """Serialize to dictionary for caching."""
         return {
+            "cache_schema_version": self.cache_schema_version,
             "effects": self.effects.tolist(),
             "component_axis": [c.to_dict() for c in self.component_axis],
             "prompt_pair": self.prompt_pair.to_dict(),
             "base_score": self.base_score,
             "clean_score": self.clean_score,
             "token_labels": self.token_labels,
+            "model_name": self.model_name,
+            "model_fingerprint": self.model_fingerprint,
+            "axis_fingerprint": self.axis_fingerprint
+            or build_axis_fingerprint(self.component_axis),
+            "node_types": self.node_types
+            or node_types_from_component_axis(self.component_axis),
+            "created_at_utc": self.created_at_utc,
         }
 
     @classmethod
@@ -160,18 +364,50 @@ class PatchEffectTensor:
             slice_label=slice_label,
             meta=prompt_dict["meta"],
         )
+        component_axis = [
+            ComponentSpec.from_dict(c)
+            for c in data.get("component_axis", [{"type": NODE_TYPE_RES, "head": None}])
+        ]
+        axis_fingerprint = data.get("axis_fingerprint")
+        cache_schema_version = data.get("cache_schema_version")
+        try:
+            parsed_cache_schema_version = int(cache_schema_version)
+        except (TypeError, ValueError):
+            parsed_cache_schema_version = PATCH_CACHE_SCHEMA_VERSION - 1
+
+        node_types = data.get("node_types")
+        if not isinstance(node_types, list) or not node_types:
+            node_types = node_types_from_component_axis(component_axis)
+
+        has_modern_metadata = all(
+            data.get(field_name)
+            for field_name in (
+                "model_name",
+                "model_fingerprint",
+                "axis_fingerprint",
+                "created_at_utc",
+            )
+        ) and "cache_schema_version" in data
+        legacy_entry = (
+            not has_modern_metadata
+            or parsed_cache_schema_version < PATCH_CACHE_SCHEMA_VERSION
+        )
+
         return cls(
             effects=np.array(data["effects"], dtype=np.float32),
-            component_axis=[
-                ComponentSpec.from_dict(c)
-                for c in data.get(
-                    "component_axis", [{"type": NODE_TYPE_RES, "head": None}]
-                )
-            ],
+            component_axis=component_axis,
             prompt_pair=prompt_pair,
             base_score=data["base_score"],
             clean_score=data["clean_score"],
             token_labels=data.get("token_labels", []),
+            cache_schema_version=parsed_cache_schema_version,
+            model_name=data.get("model_name"),
+            model_fingerprint=data.get("model_fingerprint"),
+            axis_fingerprint=axis_fingerprint
+            or build_axis_fingerprint(component_axis),
+            node_types=node_types,
+            created_at_utc=data.get("created_at_utc"),
+            is_legacy_cache_entry=legacy_entry,
         )
 
 
@@ -381,6 +617,9 @@ class PatchEffectComputer:
             tuple(node_types) if node_types is not None else (NODE_TYPE_RES,)
         )
         self.component_axis = build_component_axis(self.node_types, self.model.n_heads)
+        self.model_fingerprint = build_model_fingerprint(self.model)
+        self.axis_fingerprint = build_axis_fingerprint(self.component_axis)
+        self.cache_node_types = node_types_from_component_axis(self.component_axis)
 
     def compute_single(self, prompt_pair: PromptPair) -> PatchEffectTensor:
         """Compute patch-effect tensor for a single example.
@@ -442,6 +681,13 @@ class PatchEffectComputer:
             base_score=base_score,
             clean_score=clean_score,
             token_labels=token_labels,
+            cache_schema_version=PATCH_CACHE_SCHEMA_VERSION,
+            model_name=self.model.model_name,
+            model_fingerprint=self.model_fingerprint,
+            axis_fingerprint=self.axis_fingerprint,
+            node_types=list(self.cache_node_types),
+            created_at_utc=datetime.now(timezone.utc).isoformat(),
+            is_legacy_cache_entry=False,
         )
 
         # Store in cache

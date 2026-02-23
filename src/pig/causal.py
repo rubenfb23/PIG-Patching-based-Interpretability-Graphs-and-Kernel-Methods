@@ -9,6 +9,7 @@ This module implements an MVP causal evaluation stack with three levels:
 
 from __future__ import annotations
 
+from collections import Counter
 import json
 import sys
 from dataclasses import asdict, dataclass, field
@@ -27,7 +28,7 @@ from pig.model import (
     ActivationCache,
     HookedModel,
 )
-from pig.patching import PatchEffectTensor
+from pig.patching import PatchEffectTensor, build_axis_fingerprint
 from pig.prompts import PromptPair
 
 
@@ -239,34 +240,124 @@ def _metric_summary(
 
 def load_cached_patch_effect_tensors(
     cache_dir: Path | str = ".cache/patch_effects",
-) -> list[PatchEffectTensor]:
-    """Load all cached patch-effect tensors from disk."""
+    *,
+    expected_model_name: str | None = None,
+    expected_model_fingerprint: str | None = None,
+    expected_axis_fingerprint: str | None = None,
+    allow_legacy_cache: bool = False,
+    component_size: int | None = None,
+    return_stats: bool = False,
+) -> list[PatchEffectTensor] | tuple[list[PatchEffectTensor], dict]:
+    """Load cached patch-effect tensors with strict compatibility filtering."""
     cache_path = Path(cache_dir)
+    reason_counts: Counter[str] = Counter()
+    stats: dict[str, object] = {
+        "cache_dir": str(cache_path),
+        "total_files": 0,
+        "loaded_tensors": 0,
+        "accepted_tensors": 0,
+        "accepted_legacy_tensors": 0,
+        "discarded_tensors": 0,
+        "allow_legacy_cache": bool(allow_legacy_cache),
+        "expected_model_name": expected_model_name,
+        "expected_model_fingerprint": expected_model_fingerprint,
+        "expected_axis_fingerprint": expected_axis_fingerprint,
+        "component_size_validation": component_size,
+    }
     if not cache_path.exists():
+        stats["discard_reasons"] = {}
+        if return_stats:
+            return [], stats
         return []
 
     tensors: list[PatchEffectTensor] = []
     for json_path in sorted(cache_path.glob("*.json")):
-        with open(json_path, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-        tensors.append(PatchEffectTensor.from_dict(payload))
+        stats["total_files"] = int(stats["total_files"]) + 1
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            reason_counts["invalid_json"] += 1
+            continue
+
+        try:
+            tensor = PatchEffectTensor.from_dict(payload)
+        except (KeyError, TypeError, ValueError):
+            reason_counts["invalid_tensor_payload"] += 1
+            continue
+        stats["loaded_tensors"] = int(stats["loaded_tensors"]) + 1
+
+        if tensor.is_legacy_cache_entry and not allow_legacy_cache:
+            reason_counts["legacy_disallowed"] += 1
+            continue
+
+        if expected_model_name and tensor.model_name and tensor.model_name != expected_model_name:
+            reason_counts["model_name_mismatch"] += 1
+            continue
+
+        if expected_model_fingerprint and not tensor.is_legacy_cache_entry:
+            if tensor.model_fingerprint != expected_model_fingerprint:
+                reason_counts["model_fingerprint_mismatch"] += 1
+                continue
+
+        candidate_axis_fingerprint = (
+            tensor.axis_fingerprint or build_axis_fingerprint(tensor.component_axis)
+        )
+        if expected_axis_fingerprint and candidate_axis_fingerprint != expected_axis_fingerprint:
+            reason_counts["axis_fingerprint_mismatch"] += 1
+            continue
+
+        if component_size is not None and len(tensor.component_axis) != component_size:
+            reason_counts["component_size_validation_mismatch"] += 1
+            continue
+
+        tensors.append(tensor)
+        if tensor.is_legacy_cache_entry:
+            stats["accepted_legacy_tensors"] = int(stats["accepted_legacy_tensors"]) + 1
+
+    stats["accepted_tensors"] = len(tensors)
+    stats["discarded_tensors"] = sum(reason_counts.values())
+    stats["discard_reasons"] = dict(sorted(reason_counts.items()))
+    if return_stats:
+        return tensors, stats
     return tensors
 
 
 def select_causal_subset_from_cache(
     tensors: Sequence[PatchEffectTensor],
     num_examples: int = 20,
-    component_size: int = 14,
+    component_size: int | None = None,
     seed: int = 42,
     require_clean_better: bool = True,
-) -> list[PatchEffectTensor]:
-    """Deterministically sample a fast/reproducible subset for causal eval."""
-    filtered = [
-        t
-        for t in tensors
-        if len(t.component_axis) == component_size
-        and (not require_clean_better or t.clean_score > t.base_score)
-    ]
+    return_stats: bool = False,
+) -> list[PatchEffectTensor] | tuple[list[PatchEffectTensor], dict]:
+    """Deterministically sample a fast/reproducible subset for causal eval.
+
+    `component_size` is retained only as a deprecated validation check.
+    """
+    stats: dict[str, int | bool | None] = {
+        "input_tensors": len(tensors),
+        "require_clean_better": bool(require_clean_better),
+        "component_size_validation": component_size,
+        "discarded_clean_not_better": 0,
+        "discarded_component_size_validation": 0,
+        "candidates_after_filters": 0,
+        "selected_count": 0,
+    }
+    filtered: list[PatchEffectTensor] = []
+    for tensor in tensors:
+        if require_clean_better and not (tensor.clean_score > tensor.base_score):
+            stats["discarded_clean_not_better"] = int(
+                stats["discarded_clean_not_better"]
+            ) + 1
+            continue
+        if component_size is not None and len(tensor.component_axis) != component_size:
+            stats["discarded_component_size_validation"] = int(
+                stats["discarded_component_size_validation"]
+            ) + 1
+            continue
+        filtered.append(tensor)
+    stats["candidates_after_filters"] = len(filtered)
     filtered = sorted(
         filtered,
         key=lambda t: (
@@ -278,15 +369,24 @@ def select_causal_subset_from_cache(
     )
 
     if num_examples <= 0:
+        if return_stats:
+            return [], stats
         return []
     if len(filtered) <= num_examples:
+        stats["selected_count"] = len(filtered)
+        if return_stats:
+            return filtered, stats
         return filtered
 
     rng = np.random.default_rng(seed)
     selected_indices = np.sort(
         rng.choice(len(filtered), size=num_examples, replace=False)
     )
-    return [filtered[int(idx)] for idx in selected_indices]
+    selected = [filtered[int(idx)] for idx in selected_indices]
+    stats["selected_count"] = len(selected)
+    if return_stats:
+        return selected, stats
+    return selected
 
 
 def propose_causal_edge_candidates(

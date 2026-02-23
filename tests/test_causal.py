@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -10,12 +12,52 @@ from pig.causal import (
     CausalEvalConfig,
     activation_influence_score,
     evaluate_causal_edges,
+    load_cached_patch_effect_tensors,
     mediation_score,
     necessity_score,
     restoration_fraction,
 )
 from pig.model import create_model
-from pig.prompts import create_ioi_dataset
+from pig.patching import (
+    PATCH_CACHE_SCHEMA_VERSION,
+    ComponentSpec,
+    PatchEffectTensor,
+    build_axis_fingerprint,
+)
+from pig.prompts import PromptPair, SliceLabel, create_ioi_dataset
+
+
+def _prompt_pair(index: int = 0) -> PromptPair:
+    return PromptPair(
+        x_cln=f"clean-{index}",
+        x_crp=f"corrupt-{index}",
+        y_star="target",
+        slice_label=SliceLabel(task="ioi", corruption="name_swap"),
+        meta={},
+    )
+
+
+def _modern_tensor(
+    *,
+    model_name: str,
+    model_fingerprint: str,
+    component_axis: list[ComponentSpec],
+    index: int = 0,
+) -> PatchEffectTensor:
+    return PatchEffectTensor(
+        effects=np.ones((2, 3, len(component_axis)), dtype=np.float32),
+        component_axis=component_axis,
+        prompt_pair=_prompt_pair(index=index),
+        base_score=-1.0,
+        clean_score=1.0,
+        cache_schema_version=PATCH_CACHE_SCHEMA_VERSION,
+        model_name=model_name,
+        model_fingerprint=model_fingerprint,
+        axis_fingerprint=build_axis_fingerprint(component_axis),
+        node_types=["att" if c.node_type == "att" else c.node_type for c in component_axis],
+        created_at_utc="2026-02-23T00:00:00+00:00",
+        is_legacy_cache_entry=False,
+    )
 
 
 def test_activation_influence_score_controlled():
@@ -74,6 +116,153 @@ def test_evaluate_causal_edges_toy_smoke(tmp_path):
     npz_path = result.save_npz(tmp_path / "causal_eval.npz")
     assert json_path.exists()
     assert npz_path.exists()
+
+
+def test_load_cached_patch_effect_tensors_rejects_model_mixing(tmp_path):
+    axis_4 = [ComponentSpec(node_type="att", head=head) for head in range(4)]
+    toy_tensor = _modern_tensor(
+        model_name="toy_transformer",
+        model_fingerprint="toy_fp",
+        component_axis=axis_4,
+        index=1,
+    )
+    gpt2_tensor = _modern_tensor(
+        model_name="gpt2",
+        model_fingerprint="gpt2_fp",
+        component_axis=axis_4,
+        index=2,
+    )
+
+    (tmp_path / "toy.json").write_text(json.dumps(toy_tensor.to_dict()), encoding="utf-8")
+    (tmp_path / "gpt2.json").write_text(json.dumps(gpt2_tensor.to_dict()), encoding="utf-8")
+
+    tensors, stats = load_cached_patch_effect_tensors(
+        cache_dir=tmp_path,
+        expected_model_name="toy_transformer",
+        expected_model_fingerprint="toy_fp",
+        expected_axis_fingerprint=build_axis_fingerprint(axis_4),
+        allow_legacy_cache=False,
+        return_stats=True,
+    )
+
+    assert len(tensors) == 1
+    assert tensors[0].model_name == "toy_transformer"
+    assert stats["discard_reasons"]["model_name_mismatch"] == 1
+
+
+def test_load_cached_patch_effect_tensors_filters_axis_1_4_14(tmp_path):
+    axis_1 = [ComponentSpec(node_type="res")]
+    axis_4 = [ComponentSpec(node_type="att", head=head) for head in range(4)]
+    axis_14 = [ComponentSpec(node_type="att", head=head) for head in range(12)] + [
+        ComponentSpec(node_type="mlp"),
+        ComponentSpec(node_type="res"),
+    ]
+    model_fingerprint = "toy_fp"
+
+    tensors_to_write = [
+        _modern_tensor(
+            model_name="toy_transformer",
+            model_fingerprint=model_fingerprint,
+            component_axis=axis_1,
+            index=1,
+        ),
+        _modern_tensor(
+            model_name="toy_transformer",
+            model_fingerprint=model_fingerprint,
+            component_axis=axis_4,
+            index=2,
+        ),
+        _modern_tensor(
+            model_name="toy_transformer",
+            model_fingerprint=model_fingerprint,
+            component_axis=axis_14,
+            index=3,
+        ),
+    ]
+    for idx, tensor in enumerate(tensors_to_write):
+        (tmp_path / f"axis_{idx}.json").write_text(
+            json.dumps(tensor.to_dict()), encoding="utf-8"
+        )
+
+    tensors, stats = load_cached_patch_effect_tensors(
+        cache_dir=tmp_path,
+        expected_model_name="toy_transformer",
+        expected_model_fingerprint=model_fingerprint,
+        expected_axis_fingerprint=build_axis_fingerprint(axis_4),
+        allow_legacy_cache=False,
+        return_stats=True,
+    )
+
+    assert len(tensors) == 1
+    assert len(tensors[0].component_axis) == 4
+    assert stats["discard_reasons"]["axis_fingerprint_mismatch"] == 2
+
+
+def test_load_cached_patch_effect_tensors_rejects_legacy_by_default(tmp_path):
+    axis_4 = [ComponentSpec(node_type="att", head=head) for head in range(4)]
+    tensor = _modern_tensor(
+        model_name="toy_transformer",
+        model_fingerprint="toy_fp",
+        component_axis=axis_4,
+        index=1,
+    )
+    legacy_payload = tensor.to_dict()
+    for key in (
+        "cache_schema_version",
+        "model_name",
+        "model_fingerprint",
+        "axis_fingerprint",
+        "node_types",
+        "created_at_utc",
+    ):
+        legacy_payload.pop(key, None)
+    (tmp_path / "legacy.json").write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+    tensors, stats = load_cached_patch_effect_tensors(
+        cache_dir=tmp_path,
+        expected_model_name="toy_transformer",
+        expected_model_fingerprint="toy_fp",
+        expected_axis_fingerprint=build_axis_fingerprint(axis_4),
+        allow_legacy_cache=False,
+        return_stats=True,
+    )
+
+    assert tensors == []
+    assert stats["discard_reasons"]["legacy_disallowed"] == 1
+
+
+def test_load_cached_patch_effect_tensors_accepts_legacy_with_flag(tmp_path):
+    axis_4 = [ComponentSpec(node_type="att", head=head) for head in range(4)]
+    tensor = _modern_tensor(
+        model_name="toy_transformer",
+        model_fingerprint="toy_fp",
+        component_axis=axis_4,
+        index=1,
+    )
+    legacy_payload = tensor.to_dict()
+    for key in (
+        "cache_schema_version",
+        "model_name",
+        "model_fingerprint",
+        "axis_fingerprint",
+        "node_types",
+        "created_at_utc",
+    ):
+        legacy_payload.pop(key, None)
+    (tmp_path / "legacy.json").write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+    tensors, stats = load_cached_patch_effect_tensors(
+        cache_dir=tmp_path,
+        expected_model_name="toy_transformer",
+        expected_model_fingerprint="toy_fp",
+        expected_axis_fingerprint=build_axis_fingerprint(axis_4),
+        allow_legacy_cache=True,
+        return_stats=True,
+    )
+
+    assert len(tensors) == 1
+    assert tensors[0].is_legacy_cache_entry is True
+    assert stats["accepted_legacy_tensors"] == 1
 
 
 @pytest.mark.slow

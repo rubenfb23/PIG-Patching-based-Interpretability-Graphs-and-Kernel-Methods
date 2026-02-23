@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from types import SimpleNamespace
 
@@ -12,6 +13,12 @@ import pig.cli as cli
 import pig.causal as causal
 import pig.model as model_mod
 from pig.causal import CausalEdgeCandidate, CausalEvalConfig, CausalEvalResult
+from pig.patching import (
+    PATCH_CACHE_SCHEMA_VERSION,
+    ComponentSpec,
+    PatchEffectTensor,
+    build_axis_fingerprint,
+)
 from pig.prompts import PromptPair, SliceLabel
 
 
@@ -36,19 +43,19 @@ def test_cli_causal_eval_short_run_with_mocks(monkeypatch, tmp_path):
         meta={},
     )
 
-    def fake_load_cached_patch_effect_tensors(cache_dir):
-        _ = cache_dir
-        return [SimpleNamespace(prompt_pair=prompt_pair)]
+    def fake_load_cached_patch_effect_tensors(**kwargs):
+        _ = kwargs
+        return ([SimpleNamespace(prompt_pair=prompt_pair, clean_score=1.0, base_score=0.0)], {})
 
     def fake_select_causal_subset_from_cache(
         tensors,
         num_examples,
-        component_size,
         seed,
         require_clean_better,
+        return_stats,
     ):
-        _ = (tensors, num_examples, component_size, seed, require_clean_better)
-        return [SimpleNamespace(prompt_pair=prompt_pair)]
+        _ = (tensors, num_examples, seed, require_clean_better, return_stats)
+        return [SimpleNamespace(prompt_pair=prompt_pair)], {"selected_count": 1}
 
     def fake_propose_causal_edge_candidates(tensors, num_edges, node_types, enforce_direction, eps):
         _ = (tensors, num_edges, node_types, enforce_direction, eps)
@@ -67,7 +74,7 @@ def test_cli_causal_eval_short_run_with_mocks(monkeypatch, tmp_path):
 
     def fake_create_model(model_name, device):
         _ = (model_name, device)
-        return object()
+        return SimpleNamespace(n_heads=4, model_name="toy_transformer")
 
     def fake_evaluate(model, prompt_pairs, candidates, config, **kwargs):
         _ = (model, prompt_pairs, candidates)
@@ -114,6 +121,7 @@ def test_cli_causal_eval_short_run_with_mocks(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(causal, "evaluate_causal_edges", fake_evaluate)
     monkeypatch.setattr(model_mod, "create_model", fake_create_model)
+    monkeypatch.setattr(cli, "build_model_fingerprint", lambda model: "toy_fp")
     monkeypatch.setattr(cli, "_scripts_dir", lambda: tmp_path / "missing_scripts")
     monkeypatch.setattr(
         sys,
@@ -135,6 +143,138 @@ def test_cli_causal_eval_short_run_with_mocks(monkeypatch, tmp_path):
     assert exc.value.code == 0
     assert (out_dir / "causal_eval.json").exists()
     assert (out_dir / "causal_eval.npz").exists()
+
+
+def test_cli_causal_eval_ignores_other_model_tensors_in_shared_cache(
+    monkeypatch, tmp_path
+):
+    shared_cache = tmp_path / "shared_cache"
+    shared_cache.mkdir(parents=True, exist_ok=True)
+    out_dir = tmp_path / "causal_out"
+    axis_4 = [ComponentSpec(node_type="att", head=head) for head in range(4)]
+
+    toy_prompt = PromptPair(
+        x_cln="toy-clean",
+        x_crp="toy-corrupt",
+        y_star="target",
+        slice_label=SliceLabel(task="ioi", corruption="name_swap"),
+        meta={},
+    )
+    gpt_prompt = PromptPair(
+        x_cln="gpt-clean",
+        x_crp="gpt-corrupt",
+        y_star="target",
+        slice_label=SliceLabel(task="ioi", corruption="name_swap"),
+        meta={},
+    )
+
+    def make_tensor(prompt_pair: PromptPair, model_name: str, model_fingerprint: str):
+        return PatchEffectTensor(
+            effects=np.ones((2, 3, 4), dtype=np.float32),
+            component_axis=axis_4,
+            prompt_pair=prompt_pair,
+            base_score=-1.0,
+            clean_score=1.0,
+            cache_schema_version=PATCH_CACHE_SCHEMA_VERSION,
+            model_name=model_name,
+            model_fingerprint=model_fingerprint,
+            axis_fingerprint=build_axis_fingerprint(axis_4),
+            node_types=["att"],
+            created_at_utc="2026-02-23T00:00:00+00:00",
+            is_legacy_cache_entry=False,
+        )
+
+    toy_tensor = make_tensor(toy_prompt, "toy_transformer", "toy_fp")
+    gpt_tensor = make_tensor(gpt_prompt, "gpt2", "gpt2_fp")
+    (shared_cache / "toy.json").write_text(json.dumps(toy_tensor.to_dict()), encoding="utf-8")
+    (shared_cache / "gpt.json").write_text(json.dumps(gpt_tensor.to_dict()), encoding="utf-8")
+
+    def fake_create_model(model_name, device):
+        _ = (model_name, device)
+        return SimpleNamespace(n_heads=4, model_name="toy_transformer")
+
+    captured_prompt_pairs: dict[str, list[PromptPair]] = {}
+
+    def fake_propose_causal_edge_candidates(
+        tensors, num_edges, node_types, enforce_direction, eps
+    ):
+        _ = (tensors, num_edges, node_types, enforce_direction, eps)
+        return [
+            CausalEdgeCandidate(
+                src_layer=0,
+                src_token=0,
+                src_node_type="att",
+                src_head=0,
+                dst_layer=1,
+                dst_token=1,
+                dst_node_type="att",
+                dst_head=0,
+            )
+        ]
+
+    def fake_evaluate(model, prompt_pairs, candidates, config, **kwargs):
+        _ = (model, candidates, kwargs)
+        captured_prompt_pairs["pairs"] = list(prompt_pairs)
+        arrays = {
+            "edge_ids": np.asarray(["e1"], dtype=np.str_),
+            "src_labels": np.asarray(["L0T0.att[0]"], dtype=np.str_),
+            "dst_labels": np.asarray(["L1T1.att[0]"], dtype=np.str_),
+            "I_mean": np.asarray([0.5]),
+            "I_ci_low": np.asarray([0.4]),
+            "I_ci_high": np.asarray([0.6]),
+            "R_u_mean": np.asarray([0.4]),
+            "R_v_mean": np.asarray([0.2]),
+            "R_uv_mean": np.asarray([0.45]),
+            "M_mean": np.asarray([0.25]),
+            "R_u_clamp_v_mean": np.asarray([0.15]),
+            "necessity_mean": np.asarray([0.25]),
+            "necessity_ci_low": np.asarray([0.2]),
+            "necessity_ci_high": np.asarray([0.3]),
+        }
+        return CausalEvalResult(
+            model_name="toy_transformer",
+            config=config,
+            run_metadata={},
+            edges=[{"edge_id": "e1"}],
+            arrays=arrays,
+        )
+
+    monkeypatch.setattr(model_mod, "create_model", fake_create_model)
+    monkeypatch.setattr(causal, "propose_causal_edge_candidates", fake_propose_causal_edge_candidates)
+    monkeypatch.setattr(causal, "evaluate_causal_edges", fake_evaluate)
+    monkeypatch.setattr(cli, "build_model_fingerprint", lambda model: "toy_fp")
+    monkeypatch.setattr(cli, "_scripts_dir", lambda: tmp_path / "missing_scripts")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "pig",
+            "causal-eval",
+            "--model-name",
+            "toy_transformer",
+            "--cache-dir",
+            str(shared_cache),
+            "--output-dir",
+            str(out_dir),
+            "--num-examples",
+            "4",
+            "--num-edges",
+            "1",
+            "--node-types",
+            "att",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 0
+    assert len(captured_prompt_pairs["pairs"]) == 1
+    assert captured_prompt_pairs["pairs"][0].x_cln == toy_prompt.x_cln
+
+    run_payload = json.loads((out_dir / "causal_eval.json").read_text(encoding="utf-8"))
+    reasons = run_payload["run_metadata"]["cache_filter_stats"]["discard_reasons"]
+    assert reasons["model_name_mismatch"] == 1
 
 
 def test_cli_pipeline_forwards_causal_flags(monkeypatch):

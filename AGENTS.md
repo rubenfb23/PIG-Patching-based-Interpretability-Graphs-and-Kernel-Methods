@@ -124,6 +124,18 @@ What `pig pipeline` does internally (`src/pig/cli.py`):
 3. Renames fresh output images with model suffix (`_gpt2` or `_toy`) to avoid collisions.
 4. Restores previously-suffixed outputs if missing.
 
+### Cache policy (critical for causal-eval)
+
+- Default cache path is model-scoped: `.cache/patch_effects/<model_key>/`.
+- Causal cache loading is strict by default:
+  - primary filter: `model_fingerprint` + `axis_fingerprint`
+  - legacy entries without modern metadata are rejected (fail-closed)
+- Legacy compatibility requires explicit opt-in:
+  - `uv run pig causal-eval --allow-legacy-cache ...`
+- `--component-size` is deprecated and only validation-only (not primary filtering).
+- Rebuild cache after model/eje changes:
+  - `uv run pig viewer-cache --model-name <model_or_checkpoint>`
+
 ---
 
 ## 6) Outputs and artifacts
@@ -208,6 +220,8 @@ Use `gpt2` pipeline run only when needed due to runtime/resource cost.
 - Tokenization ambiguity can make `y_star` validation unstable if not normalized.
 - Hook point mismatches can silently invalidate patching assumptions.
 - Output file collisions are handled by suffixing; don’t hardcode raw filenames.
+- Mixed-model cache directories can silently contaminate causal subsets unless strict metadata filtering is active.
+- Legacy cache files (no metadata) are rejected by default; rebuild with `viewer-cache` unless you intentionally set `--allow-legacy-cache`.
 - Large model runs are expensive; prefer toy model for quick iteration.
 - Reproducibility depends on fixed seeds in prompt generation and deterministic config choices.
 
@@ -244,6 +258,15 @@ uv run pig pipeline --model-name gpt2
 
 # Continue even if one script fails
 uv run pig pipeline --continue-on-error
+
+# Build cache with model-scoped default dir
+uv run pig viewer-cache --model-name toy_transformer
+
+# Causal eval with strict model+axis filtering (default)
+uv run pig causal-eval --model-name toy_transformer
+
+# Explicit legacy mode (only when needed for migration/debug)
+uv run pig causal-eval --model-name toy_transformer --allow-legacy-cache
 
 # Generate artifacts directly
 uv run python scripts/generate_pipeline_artifacts.py

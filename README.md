@@ -78,6 +78,13 @@ Run interventional causal evaluation on a small subset from cached patch effects
 uv run pig causal-eval --model-name gpt2
 ```
 
+Default cache location is now model-scoped:
+
+- `gpt2` -> `.cache/patch_effects/gpt2`
+- `toy_transformer` -> `.cache/patch_effects/toy_transformer`
+- local checkpoint path (e.g. `outputs/gpt2_gsm8k_distilled`) ->
+  `.cache/patch_effects/outputs_gpt2_gsm8k_distilled`
+
 You can also append it to the existing pipeline:
 
 ```bash
@@ -92,7 +99,17 @@ uv run pig causal-eval --model-name outputs/gpt2_gsm8k_distilled
 
 # Tune runtime budget
 uv run pig causal-eval --num-examples 20 --num-edges 5 --bootstrap-samples 200 --permutation-samples 200
+
+# If you intentionally need legacy cache entries (no modern metadata)
+uv run pig causal-eval --model-name gpt2 --allow-legacy-cache
 ```
+
+Cache safety policy:
+
+- Causal eval filters cache tensors by `model_fingerprint` + `axis_fingerprint`.
+- Legacy cache entries without modern metadata are rejected by default (fail-closed).
+- `--component-size` is deprecated and only retained as validation.
+- Use `--cache-dir` only when you intentionally override model-scoped defaults.
 
 Outputs are written to `outputs/causal_eval/`:
 
@@ -117,13 +134,13 @@ TypeScript 3D client.
 1. Generate cache files (toy model by default):
 
 ```bash
-uv run pig viewer-cache --model-name toy_transformer --cache-dir .cache/patch_effects
+uv run pig viewer-cache --model-name toy_transformer
 ```
 
 1. Start backend from repo root:
 
 ```bash
-uv run pig viewer --cache-dir .cache/patch_effects --host 127.0.0.1 --port 8765
+uv run pig viewer --cache-dir .cache/patch_effects/toy_transformer --host 127.0.0.1 --port 8765
 ```
 
 1. In another terminal, start frontend:
@@ -149,7 +166,7 @@ Development mode:
 
 ```bash
 # terminal 1 (backend)
-uv run pig viewer --cache-dir .cache/patch_effects --host 127.0.0.1 --port 8765
+uv run pig viewer --cache-dir .cache/patch_effects/toy_transformer --host 127.0.0.1 --port 8765
 
 # terminal 2 (frontend)
 cd web
@@ -173,6 +190,19 @@ Then open `http://127.0.0.1:4173` while backend is still running on `8765`.
   - Stop process: `kill <PID>`
 - If cache generation options changed (e.g. `--node-types`), regenerate cache before launching backend.
 - If frontend changes are not visible, hard refresh browser (`Ctrl+Shift+R`).
+
+### Cache migration / rebuild
+
+```bash
+# Rebuild modern cache metadata for base GPT-2
+uv run pig viewer-cache --model-name gpt2
+
+# Rebuild for toy model
+uv run pig viewer-cache --model-name toy_transformer
+
+# Rebuild for a fine-tuned/distilled checkpoint path
+uv run pig viewer-cache --model-name outputs/gpt2_gsm8k_distilled
+```
 
 ## GPT-2 Teacher Distillation (GSM8K)
 

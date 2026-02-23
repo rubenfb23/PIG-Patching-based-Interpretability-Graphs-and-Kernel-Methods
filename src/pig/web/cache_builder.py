@@ -6,7 +6,7 @@ import argparse
 from collections.abc import Sequence
 
 from pig.model import ALLOWED_NODE_TYPES, create_model
-from pig.patching import compute_patch_effects
+from pig.patching import compute_patch_effects, default_patch_cache_dir
 from pig.prompts import PromptPair, create_ioi_dataset
 
 
@@ -51,8 +51,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--cache-dir",
-        default=".cache/patch_effects",
-        help="Output directory for patch-effect cache JSON files",
+        default=None,
+        help=(
+            "Output directory for patch-effect cache JSON files "
+            "(default: .cache/patch_effects/<model_key>)"
+        ),
     )
     parser.add_argument(
         "--num-examples",
@@ -97,6 +100,8 @@ def main() -> None:
 
     print(f"Loading model: {args.model_name}")
     model = create_model(model_name=args.model_name)
+    cache_dir = args.cache_dir or str(default_patch_cache_dir(args.model_name))
+    print(f"Cache dir: {cache_dir}")
 
     pairs = _build_pairs(corruptions, args.num_examples, args.seed)
     print(
@@ -107,13 +112,13 @@ def main() -> None:
     dataset = compute_patch_effects(
         model=model,
         prompt_pairs=pairs,
-        cache_dir=args.cache_dir,
+        cache_dir=cache_dir,
         show_progress=True,
         node_types=node_types,
     )
     print(
         "Cache generation completed: "
-        f"{len(dataset)} tensors written to {args.cache_dir}"
+        f"{len(dataset)} tensors written to {cache_dir}"
     )
 
 

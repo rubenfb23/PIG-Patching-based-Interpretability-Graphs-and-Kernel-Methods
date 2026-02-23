@@ -12,6 +12,13 @@ from pathlib import Path
 
 from tqdm.auto import tqdm
 
+from pig.patching import (
+    build_axis_fingerprint,
+    build_component_axis,
+    build_model_fingerprint,
+    default_patch_cache_dir,
+)
+
 VALIDATION_SEQUENCE = [
     "validate_story_1_1.py",
     "validate_story_1_2.py",
@@ -42,6 +49,12 @@ def _model_output_suffix(model_name: str) -> str:
     if normalized in {"toy", "toy_model", "toy_transformer"}:
         return "_toy"
     return "_gpt2"
+
+
+def _resolve_cache_dir(model_name: str, cache_dir: str | None) -> str:
+    if cache_dir:
+        return cache_dir
+    return str(default_patch_cache_dir(model_name))
 
 
 @contextlib.contextmanager
@@ -151,19 +164,21 @@ def _run_script(
 
 def _run_causal_eval_subcommand(
     model_name: str,
-    cache_dir: str = ".cache/patch_effects",
+    cache_dir: str | None = None,
     output_dir: str = "outputs/causal_eval",
     log_path: str | None = None,
     num_examples: int = 20,
     num_edges: int = 5,
     node_types: str = "att",
-    component_size: int = 14,
+    component_size: int | None = None,
+    allow_legacy_cache: bool = False,
     seed: int = 42,
     eps: float = 1e-6,
     bootstrap_samples: int = 200,
     permutation_samples: int = 200,
     device: str | None = None,
 ) -> int:
+    resolved_cache_dir = _resolve_cache_dir(model_name, cache_dir)
     command = [
         sys.executable,
         "-m",
@@ -172,7 +187,7 @@ def _run_causal_eval_subcommand(
         "--model-name",
         model_name,
         "--cache-dir",
-        cache_dir,
+        resolved_cache_dir,
         "--output-dir",
         output_dir,
         "--num-examples",
@@ -181,8 +196,6 @@ def _run_causal_eval_subcommand(
         str(num_edges),
         "--node-types",
         node_types,
-        "--component-size",
-        str(component_size),
         "--seed",
         str(seed),
         "--eps",
@@ -192,6 +205,10 @@ def _run_causal_eval_subcommand(
         "--permutation-samples",
         str(permutation_samples),
     ]
+    if component_size is not None:
+        command.extend(["--component-size", str(component_size)])
+    if allow_legacy_cache:
+        command.append("--allow-legacy-cache")
     if log_path:
         command.extend(["--log-path", log_path])
     if device:
@@ -208,13 +225,14 @@ def _run_causal_eval_subcommand(
 
 def _run_viewer_cache_subcommand(
     model_name: str,
-    cache_dir: str = ".cache/patch_effects",
+    cache_dir: str | None = None,
     num_examples: int = 16,
     corruptions: str = "name_swap,abba",
     node_types: str = "att",
     seed: int = 42,
     log_file=None,
 ) -> int:
+    resolved_cache_dir = _resolve_cache_dir(model_name, cache_dir)
     command = [
         sys.executable,
         "-m",
@@ -222,7 +240,7 @@ def _run_viewer_cache_subcommand(
         "--model-name",
         model_name,
         "--cache-dir",
-        cache_dir,
+        resolved_cache_dir,
         "--num-examples",
         str(num_examples),
         "--corruptions",
@@ -249,13 +267,14 @@ def run_pipeline(
     graph_builder: str | None = None,
     pipeline_log_path: str | None = None,
     with_causal_eval: bool = False,
-    causal_cache_dir: str = ".cache/patch_effects",
+    causal_cache_dir: str | None = None,
     causal_output_dir: str = "outputs/causal_eval",
     causal_log_path: str | None = None,
     causal_num_examples: int = 20,
     causal_num_edges: int = 5,
     causal_node_types: str = "att",
-    causal_component_size: int = 14,
+    causal_component_size: int | None = None,
+    causal_allow_legacy_cache: bool = False,
     causal_seed: int = 42,
     causal_eps: float = 1e-6,
     causal_bootstrap_samples: int = 200,
@@ -355,6 +374,7 @@ def run_pipeline(
                 num_edges=causal_num_edges,
                 node_types=causal_node_types,
                 component_size=causal_component_size,
+                allow_legacy_cache=causal_allow_legacy_cache,
                 seed=causal_seed,
                 eps=causal_eps,
                 bootstrap_samples=causal_bootstrap_samples,
@@ -433,8 +453,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     pipeline_parser.add_argument(
         "--causal-cache-dir",
-        default=".cache/patch_effects",
-        help="Cache directory used by causal-eval",
+        default=None,
+        help=(
+            "Cache directory used by causal-eval "
+            "(default: .cache/patch_effects/<model_key>)"
+        ),
     )
     pipeline_parser.add_argument(
         "--causal-output-dir",
@@ -466,8 +489,19 @@ def _build_parser() -> argparse.ArgumentParser:
     pipeline_parser.add_argument(
         "--causal-component-size",
         type=int,
-        default=14,
-        help="Component-axis size filter for causal-eval subset",
+        default=None,
+        help=(
+            "Deprecated validation-only check for component-axis size. "
+            "Not used as primary cache filter."
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--causal-allow-legacy-cache",
+        action="store_true",
+        help=(
+            "Allow legacy cache entries without modern metadata "
+            "(disabled by default; may mix incompatible tensors)."
+        ),
     )
     pipeline_parser.add_argument(
         "--causal-seed",
@@ -570,8 +604,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     cache_parser.add_argument(
         "--cache-dir",
-        default=".cache/patch_effects",
-        help="Output directory for patch-effect cache JSON files",
+        default=None,
+        help=(
+            "Output directory for patch-effect cache JSON files "
+            "(default: .cache/patch_effects/<model_key>)"
+        ),
     )
     cache_parser.add_argument(
         "--num-examples",
@@ -612,8 +649,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     causal_parser.add_argument(
         "--cache-dir",
-        default=".cache/patch_effects",
-        help="Directory with cached patch-effect JSON files",
+        default=None,
+        help=(
+            "Directory with cached patch-effect JSON files "
+            "(default: .cache/patch_effects/<model_key>)"
+        ),
     )
     causal_parser.add_argument(
         "--output-dir",
@@ -645,8 +685,19 @@ def _build_parser() -> argparse.ArgumentParser:
     causal_parser.add_argument(
         "--component-size",
         type=int,
-        default=14,
-        help="Filter cached tensors by component-axis size",
+        default=None,
+        help=(
+            "Deprecated validation-only check for component-axis size. "
+            "Strict cache filtering uses model+axis fingerprints."
+        ),
+    )
+    causal_parser.add_argument(
+        "--allow-legacy-cache",
+        action="store_true",
+        help=(
+            "Allow legacy cache entries without modern metadata "
+            "(disabled by default)."
+        ),
     )
     causal_parser.add_argument(
         "--seed",
@@ -687,13 +738,16 @@ def main() -> None:
             graph_builder=getattr(args, "graph_builder", None),
             pipeline_log_path=getattr(args, "pipeline_log_path", None),
             with_causal_eval=getattr(args, "with_causal_eval", False),
-            causal_cache_dir=getattr(args, "causal_cache_dir", ".cache/patch_effects"),
+            causal_cache_dir=getattr(args, "causal_cache_dir", None),
             causal_output_dir=getattr(args, "causal_output_dir", "outputs/causal_eval"),
             causal_log_path=getattr(args, "causal_log_path", None),
             causal_num_examples=getattr(args, "causal_num_examples", 20),
             causal_num_edges=getattr(args, "causal_num_edges", 5),
             causal_node_types=getattr(args, "causal_node_types", "att"),
-            causal_component_size=getattr(args, "causal_component_size", 14),
+            causal_component_size=getattr(args, "causal_component_size", None),
+            causal_allow_legacy_cache=getattr(
+                args, "causal_allow_legacy_cache", False
+            ),
             causal_seed=getattr(args, "causal_seed", 42),
             causal_eps=getattr(args, "causal_eps", 1e-6),
             causal_bootstrap_samples=getattr(args, "causal_bootstrap_samples", 200),
@@ -742,6 +796,7 @@ def main() -> None:
 
     if args.command == "viewer-cache":
         cache_module = "pig.web.cache_builder"
+        cache_dir = _resolve_cache_dir(args.model_name, args.cache_dir)
         cache_command = [
             sys.executable,
             "-m",
@@ -749,7 +804,7 @@ def main() -> None:
             "--model-name",
             args.model_name,
             "--cache-dir",
-            args.cache_dir,
+            cache_dir,
             "--num-examples",
             str(args.num_examples),
             "--corruptions",
@@ -782,22 +837,56 @@ def main() -> None:
         log_path = Path(args.log_path) if args.log_path else (output_dir / "causal_eval.log")
         with _stream_stdio_to_log(log_path) as log_file:
             node_types = [x.strip() for x in args.node_types.split(",") if x.strip()]
+            cache_dir = _resolve_cache_dir(args.model_name, args.cache_dir)
+            if args.allow_legacy_cache:
+                print(
+                    "[WARN] --allow-legacy-cache enabled: legacy tensors without "
+                    "modern metadata may be reused."
+                )
+            if args.component_size is not None:
+                print(
+                    "[WARN] --component-size is deprecated and only used as "
+                    "validation, not as primary cache filter."
+                )
             print(
                 "Starting causal-eval "
                 f"(model={args.model_name}, examples={args.num_examples}, edges={args.num_edges})"
             )
             print(f"Log file: {log_path}")
+            print(f"Cache dir: {cache_dir}")
 
-            tensors = load_cached_patch_effect_tensors(cache_dir=args.cache_dir)
-            subset = select_causal_subset_from_cache(
+            model = create_model(model_name=args.model_name, device=args.device)
+            expected_component_axis = build_component_axis(
+                node_types=node_types,
+                num_heads=model.n_heads,
+            )
+            expected_model_fingerprint = build_model_fingerprint(model)
+            expected_axis_fingerprint = build_axis_fingerprint(expected_component_axis)
+
+            tensors_result = load_cached_patch_effect_tensors(
+                cache_dir=cache_dir,
+                expected_model_name=getattr(model, "model_name", None),
+                expected_model_fingerprint=expected_model_fingerprint,
+                expected_axis_fingerprint=expected_axis_fingerprint,
+                allow_legacy_cache=args.allow_legacy_cache,
+                component_size=args.component_size,
+                return_stats=True,
+            )
+            tensors, cache_filter_stats = tensors_result
+            subset, subset_filter_stats = select_causal_subset_from_cache(
                 tensors,
                 num_examples=args.num_examples,
-                component_size=args.component_size,
                 seed=args.seed,
                 require_clean_better=True,
+                return_stats=True,
             )
             if not subset:
-                print("[FAIL] No eligible cached tensors found for causal eval subset")
+                print(
+                    "[FAIL] No eligible cached tensors found after strict cache filtering. "
+                    "Regenerate cache for this model/eje with `pig viewer-cache`."
+                )
+                print(f"[INFO] Cache filter stats: {cache_filter_stats}")
+                print(f"[INFO] Subset filter stats: {subset_filter_stats}")
                 raise SystemExit(1)
 
             candidates = propose_causal_edge_candidates(
@@ -812,7 +901,6 @@ def main() -> None:
                 raise SystemExit(1)
 
             prompt_pairs = [tensor.prompt_pair for tensor in subset]
-            model = create_model(model_name=args.model_name, device=args.device)
             config = CausalEvalConfig(
                 eps=args.eps,
                 bootstrap_samples=args.bootstrap_samples,
@@ -831,10 +919,18 @@ def main() -> None:
             )
             result.run_metadata.update(
                 {
-                    "cache_dir": args.cache_dir,
+                    "cache_dir": cache_dir,
                     "output_dir": args.output_dir,
                     "log_path": str(log_path),
-                    "component_size": args.component_size,
+                    "component_size_validation": args.component_size,
+                    "component_size_validation_deprecated": args.component_size
+                    is not None,
+                    "allow_legacy_cache": args.allow_legacy_cache,
+                    "expected_model_fingerprint": expected_model_fingerprint,
+                    "expected_axis_fingerprint": expected_axis_fingerprint,
+                    "expected_component_axis_size": len(expected_component_axis),
+                    "cache_filter_stats": cache_filter_stats,
+                    "subset_filter_stats": subset_filter_stats,
                     "requested_node_types": node_types,
                 }
             )
