@@ -70,6 +70,45 @@ If you want to continue even if a stage fails:
 pig pipeline --continue-on-error
 ```
 
+### Causal A/B/C Evaluation (GPT-2, fast subset)
+
+Run interventional causal evaluation on a small subset from cached patch effects:
+
+```bash
+uv run pig causal-eval --model-name gpt2
+```
+
+You can also append it to the existing pipeline:
+
+```bash
+uv run pig pipeline --model-name gpt2 --with-causal-eval
+```
+
+Common overrides:
+
+```bash
+# Use your local fine-tuned GPT-2 checkpoint path
+uv run pig causal-eval --model-name outputs/gpt2_gsm8k_distilled
+
+# Tune runtime budget
+uv run pig causal-eval --num-examples 20 --num-edges 5 --bootstrap-samples 200 --permutation-samples 200
+```
+
+Outputs are written to `outputs/causal_eval/`:
+
+- `causal_eval.json`
+- `causal_eval.npz`
+- `quicklook_causal.png`
+
+You can regenerate the quicklook manually:
+
+```bash
+uv run python scripts/plot_causal_eval.py \
+  --json-path outputs/causal_eval/causal_eval.json \
+  --npz-path outputs/causal_eval/causal_eval.npz \
+  --output-path outputs/causal_eval/quicklook_causal.png
+```
+
 ### Local 4D Graph Viewer (Web)
 
 You can now run a local interactive viewer backend over WebSocket and connect a
@@ -81,13 +120,13 @@ TypeScript 3D client.
 uv run pig viewer-cache --model-name toy_transformer --cache-dir .cache/patch_effects
 ```
 
-2. Start backend from repo root:
+1. Start backend from repo root:
 
 ```bash
 uv run pig viewer --cache-dir .cache/patch_effects --host 127.0.0.1 --port 8765
 ```
 
-3. In another terminal, start frontend:
+1. In another terminal, start frontend:
 
 ```bash
 cd web
@@ -95,7 +134,7 @@ npm install
 npm run dev
 ```
 
-4. Open `http://127.0.0.1:5173` and explore the graph by slice/layer/token and
+1. Open `http://127.0.0.1:5173` and explore the graph by slice/layer/token and
 edge-weight threshold.
 
 Notes:
@@ -130,8 +169,8 @@ Then open `http://127.0.0.1:4173` while backend is still running on `8765`.
 #### Troubleshooting
 
 - `address already in use` on port `8765` means an older backend process is still running.
-    - Check: `ss -ltnp '( sport = :8765 )'`
-    - Stop process: `kill <PID>`
+  - Check: `ss -ltnp '( sport = :8765 )'`
+  - Stop process: `kill <PID>`
 - If cache generation options changed (e.g. `--node-types`), regenerate cache before launching backend.
 - If frontend changes are not visible, hard refresh browser (`Ctrl+Shift+R`).
 
