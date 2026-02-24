@@ -228,3 +228,5 @@ web/tsconfig.tsbuildinfo
 *.json
 *.png
 *.jsonl
+*.npz
+*.html

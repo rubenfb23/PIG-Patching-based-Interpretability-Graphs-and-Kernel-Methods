@@ -14,7 +14,11 @@
 
 ## Propuesta de candidatos (antes de evaluar)
 
-  Se construye la matriz de efectos de patch $\mathbf{X} \in \mathbb{R}^{N \times D}$ donde $N$ = ejemplos y $D$ = nodos totales:
+  El CLI actual usa un split disjunto:
+  - `discovery`: propone candidatos
+  - `evaluation`: evalúa A/B/C sobre esos candidatos
+
+  Se construye la matriz de efectos de patch $\mathbf{X} \in \mathbb{R}^{N \times D}$ en `discovery`, donde $N$ = ejemplos y $D$ = nodos totales:
 
   $$\mathbf{X}_{t,i} = \frac{\text{effects}_{t,i}}{\max(O^\text{cln}_t - O^\text{base}_t,\ \varepsilon)}$$
 
@@ -24,6 +28,7 @@
   \text{ y nodo } j$$
 
   Los **top-k pares dirigidos** $(u \to v)$ con $u < v$ (orden causal forward) y mayor $|C_{uv}|$ son los candidatos.
+  Además, en la implementación actual se excluyen aristas `att -> att` en la misma capa (cómputo paralelo entre heads).
 
   ---
 
@@ -99,17 +104,19 @@
 
   ---
 
-  ## Correcciones por comparaciones múltiples
+## Correcciones por comparaciones múltiples
 
-  Se aplican sobre los p-values de las **7 métricas** $\times$ **$m$ aristas** simultáneamente:
+  Se aplican **por métrica**, no sobre el bloque completo $7 \times m$.
+  Para cada métrica $X \in \{I, R_u, R_v, R_{uv}, M, R_{u,\text{clamp}(v)}, \text{nec}\}$,
+  se corrigen sus $m_X$ p-values (uno por arista evaluada con valor finito).
 
-  **Benjamini-Hochberg (FDR)** — ordena los $m$ p-values $p_{(1)} \leq \cdots \leq p_{(m)}$:
+  **Benjamini-Hochberg (FDR)** — ordena los $m_X$ p-values $p_{(1)} \leq \cdots \leq p_{(m_X)}$:
 
-  $$\tilde{p}_{(i)}^{\text{BH}} = \min_{j \geq i}\left(\frac{m}{j} \cdot p_{(j)}\right)$$
+  $$\tilde{p}_{(i)}^{\text{BH}} = \min_{j \geq i}\left(\frac{m_X}{j} \cdot p_{(j)}\right)$$
 
   **Bonferroni** (más conservador):
 
-  $$\tilde{p}_i^{\text{Bonf}} = \min(m \cdot p_i,\ 1)$$
+  $$\tilde{p}_i^{\text{Bonf}} = \min(m_X \cdot p_i,\ 1)$$
 
   ---
 
