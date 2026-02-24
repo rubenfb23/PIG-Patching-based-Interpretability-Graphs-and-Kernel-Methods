@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from pig.graph import PatchInfluenceGraph, create_graph_builder
+from pig.graph import GraphBuilder, PatchInfluenceGraph, create_graph_builder
 from pig.patching import PatchEffectDataset, PatchEffectTensor
 from pig.prompts import SliceLabel
 from pig.web.schemas import ViewFilter
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,7 @@ class GraphViewerService:
         self,
         dataset: PatchEffectDataset,
         config: ViewerConfig,
+        builder: GraphBuilder | None = None,
     ):
         if len(dataset) == 0:
             message = "Cannot initialize viewer service with empty dataset"
@@ -44,17 +48,30 @@ class GraphViewerService:
 
         self._dataset = dataset
         self._config = config
-        self._builder = create_graph_builder(
+        self._builder = builder or create_graph_builder(
             k=config.top_k,
             enforce_direction=config.enforce_direction,
         )
-        self._graphs = self._builder.build_all(dataset)
+        self._graphs = self._build_graphs_gracefully(dataset)
+        if not self._graphs:
+            raise ValueError("No graph slices could be built from dataset")
         self._slice_ids = sorted(_slice_to_id(label) for label in self._graphs)
         self._token_labels_by_slice = self._build_token_labels()
 
     @property
     def slice_ids(self) -> list[str]:
         return self._slice_ids
+
+    def _build_graphs_gracefully(self, dataset: PatchEffectDataset):
+        graphs: dict[SliceLabel, PatchInfluenceGraph] = {}
+        for slice_label in dataset.get_slices():
+            try:
+                graphs[slice_label] = self._builder.build_from_slice(
+                    dataset, slice_label
+                )
+            except ValueError as exc:
+                logger.warning("Skipping slice %s: %s", slice_label, exc)
+        return graphs
 
     def _build_token_labels(self) -> dict[str, list[str]]:
         """Build token label lists keyed by slice_id from the first tensor per slice."""
@@ -177,8 +194,27 @@ def load_dataset_from_cache(cache_dir: Path | str) -> PatchEffectDataset:
         raise ValueError(f"Cache directory does not exist: {cache_path}")
 
     cache_files = sorted(cache_path.glob("*.json"))
+    selected_cache_path = cache_path
     if not cache_files:
-        raise ValueError(f"No cache files found in: {cache_path}")
+        # Auto-pick the newest run directory when cache_dir is a parent container.
+        latest_candidate: tuple[int, Path, list[Path]] | None = None
+        for child in sorted(cache_path.iterdir()):
+            if not child.is_dir():
+                continue
+            child_files = sorted(child.glob("*.json"))
+            if not child_files:
+                continue
+            newest_mtime = max(file_path.stat().st_mtime_ns for file_path in child_files)
+            if latest_candidate is None or newest_mtime > latest_candidate[0]:
+                latest_candidate = (newest_mtime, child, child_files)
+        if latest_candidate is None:
+            raise ValueError(f"No cache files found in: {cache_path}")
+        selected_cache_path = latest_candidate[1]
+        cache_files = latest_candidate[2]
+        print(
+            "Viewer cache loader: auto-selected latest cache run "
+            f"{selected_cache_path}"
+        )
 
     tensors: list[PatchEffectTensor] = []
     for file_path in cache_files:

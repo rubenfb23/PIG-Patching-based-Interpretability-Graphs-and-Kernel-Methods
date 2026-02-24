@@ -672,7 +672,15 @@ def _build_parser() -> argparse.ArgumentParser:
     viewer_parser.add_argument(
         "--cache-dir",
         default=".cache/patch_effects",
-        help="Directory with cached patch-effect JSON files",
+        help=(
+            "Directory with cached patch-effect JSON files, or a parent "
+            "directory with per-run subdirectories (latest run auto-selected)"
+        ),
+    )
+    viewer_parser.add_argument(
+        "--base-cache-dir",
+        default=None,
+        help="Directory with base-model cache to enable diff_correlation_topk",
     )
     viewer_parser.add_argument(
         "--host",
@@ -920,6 +928,8 @@ def main() -> None:
             "--max-edges",
             str(args.max_edges),
         ]
+        if args.base_cache_dir:
+            viewer_command.extend(["--base-cache-dir", args.base_cache_dir])
         code = subprocess.run(
             viewer_command,
             cwd=str(_repo_root()),

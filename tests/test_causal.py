@@ -16,6 +16,7 @@ from pig.causal import (
     load_cached_patch_effect_tensors,
     mediation_score,
     necessity_score,
+    propose_causal_edge_candidates,
     restoration_fraction,
     split_discovery_evaluation_tensors,
 )
@@ -83,6 +84,44 @@ def test_restoration_mediation_necessity_formulas():
     assert r_uv == pytest.approx(0.75)
     assert mediation_score(r_uv, r_v) == pytest.approx(0.5)
     assert necessity_score(r_u, r_u_clamp) == pytest.approx(0.375)
+
+
+def test_propose_causal_edge_candidates_excludes_same_layer_att():
+    """Same-layer att→att edges must be excluded: they compute in parallel."""
+    rng = np.random.default_rng(0)
+    # 2 layers, 3 tokens, 4 att heads → shape (n_examples, 2*3*4) = (5, 24)
+    num_layers, num_tokens, num_heads = 2, 3, 4
+    component_axis = [
+        ComponentSpec(node_type="att", head=h) for h in range(num_heads)
+    ]
+    tensors = []
+    for _ in range(5):
+        effects = rng.random((num_layers, num_tokens, num_heads), dtype=np.float32)
+        t = PatchEffectTensor(
+            effects=effects,
+            component_axis=component_axis,
+            prompt_pair=_prompt_pair(),
+            base_score=0.0,
+            clean_score=1.0,
+            cache_schema_version=PATCH_CACHE_SCHEMA_VERSION,
+            model_name="test",
+            model_fingerprint="fp",
+            axis_fingerprint=build_axis_fingerprint(component_axis),
+            node_types=["att"] * num_heads,
+            created_at_utc="2026-01-01T00:00:00+00:00",
+            is_legacy_cache_entry=False,
+        )
+        tensors.append(t)
+
+    candidates = propose_causal_edge_candidates(
+        tensors, num_edges=100, node_types=["att"], enforce_direction=True
+    )
+    for c in candidates:
+        assert not (
+            c.src_layer == c.dst_layer
+            and c.src_node_type == "att"
+            and c.dst_node_type == "att"
+        ), f"Same-layer att→att candidate must not be proposed: {c}"
 
 
 def test_evaluate_causal_edges_toy_smoke(tmp_path):

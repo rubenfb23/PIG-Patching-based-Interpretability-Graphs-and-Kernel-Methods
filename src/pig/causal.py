@@ -758,6 +758,15 @@ def propose_causal_edge_candidates(
             dst = nodes[dst_idx]
             if enforce_direction and not (src < dst):
                 continue
+            # Attention heads at the same layer all read from the same residual
+            # stream input and compute in parallel — patching one head cannot
+            # influence another head in the same layer, so skip these edges.
+            if (
+                src.node_type == NODE_TYPE_ATT
+                and dst.node_type == NODE_TYPE_ATT
+                and src.layer == dst.layer
+            ):
+                continue
             weight = float(corr[src_idx, dst_idx])
             if not np.isfinite(weight):
                 continue

@@ -47,6 +47,7 @@ def _build_pipeline_command(
     model_name: str,
     graph_builder: str,
     pipeline_log_path: Path,
+    causal_cache_dir: Path,
     causal_output_dir: Path,
     causal_seed: int,
     causal_num_examples: int,
@@ -72,6 +73,8 @@ def _build_pipeline_command(
         "--pipeline-log-path",
         str(pipeline_log_path),
         "--with-causal-eval",
+        "--causal-cache-dir",
+        str(causal_cache_dir),
         "--causal-build-cache",
         "--causal-build-cache-num-examples",
         str(causal_build_cache_num_examples),
@@ -111,7 +114,9 @@ def _log(msg: str) -> None:
         print(msg, flush=True)
 
 
-def _run_command(command: list[str], cwd: Path, dry_run: bool, env: dict | None = None) -> int:
+def _run_command(
+    command: list[str], cwd: Path, dry_run: bool, env: dict | None = None
+) -> int:
     _log(f"$ {shlex.join(command)}")
     if dry_run:
         return 0
@@ -134,21 +139,21 @@ def main() -> int:
     )
     parser.add_argument(
         "--finetuned-model",
-        default="outputs/gpt2_gsm8k_distilled",
+        default="outputs/gpt2_gsm8k_distilled_lr2e5_acc4/model_final",
         help=(
             "Fine-tuned/distilled model name/path for the second run "
-            "(default: outputs/gpt2_gsm8k_distilled)"
+            "(default: outputs/gpt2_gsm8k_distilled_lr2e5_acc4/model_final)"
         ),
     )
     parser.add_argument(
         "--seeds",
-        default="42,123,777",
+        default="42",
         help="Comma-separated seeds. Each model runs once per seed.",
     )
     parser.add_argument(
         "--causal-build-cache-num-examples",
         type=int,
-        default=500,
+        default=200,
         help="Examples per corruption for cache build.",
     )
     parser.add_argument(
@@ -171,13 +176,13 @@ def main() -> int:
     parser.add_argument(
         "--causal-bootstrap-samples",
         type=int,
-        default=500,
+        default=200,
         help="Bootstrap samples for causal-eval.",
     )
     parser.add_argument(
         "--causal-permutation-samples",
         type=int,
-        default=500,
+        default=200,
         help="Permutation samples for causal-eval.",
     )
     parser.add_argument(
@@ -214,6 +219,14 @@ def main() -> int:
         "--causal-output-root",
         default="outputs/causal_eval/publication",
         help="Root directory for causal-eval outputs.",
+    )
+    parser.add_argument(
+        "--causal-cache-root",
+        default=".cache/patch_effects/publication",
+        help=(
+            "Root directory for causal cache runs. "
+            "Each model/seed run writes to a unique subdirectory."
+        ),
     )
     parser.add_argument(
         "--uv-bin",
@@ -286,9 +299,13 @@ def main() -> int:
         model_key = _model_key(model_name)
         for seed in seeds:
             run_key = f"{model_key}_{run_stamp}_seed{seed}"
-            pipeline_log_path = repo_root / args.pipeline_log_dir / f"pipeline_{run_key}.log"
+            pipeline_log_path = (
+                repo_root / args.pipeline_log_dir / f"pipeline_{run_key}.log"
+            )
+            causal_cache_dir = repo_root / args.causal_cache_root / model_key / run_key
             causal_output_dir = repo_root / args.causal_output_root / run_key
             pipeline_log_path.parent.mkdir(parents=True, exist_ok=True)
+            causal_cache_dir.parent.mkdir(parents=True, exist_ok=True)
             causal_output_dir.parent.mkdir(parents=True, exist_ok=True)
 
             command = _build_pipeline_command(
@@ -296,6 +313,7 @@ def main() -> int:
                 model_name=model_name,
                 graph_builder=args.graph_builder,
                 pipeline_log_path=pipeline_log_path,
+                causal_cache_dir=causal_cache_dir,
                 causal_output_dir=causal_output_dir,
                 causal_seed=seed,
                 causal_num_examples=args.causal_num_examples,
@@ -321,9 +339,12 @@ def main() -> int:
                 f"Model: {model_name}\n"
                 f"Seed:  {seed}\n"
                 f"Pipeline log: {pipeline_log_path}\n"
+                f"Causal cache: {causal_cache_dir}\n"
                 f"Causal output: {causal_output_dir}"
             )
-            exit_code = _run_command(command, cwd=repo_root, dry_run=args.dry_run, env=env)
+            exit_code = _run_command(
+                command, cwd=repo_root, dry_run=args.dry_run, env=env
+            )
             if exit_code != 0:
                 msg = f"[FAIL] Exit code {exit_code} for model={model_name} seed={seed}"
                 _log(msg)
@@ -342,7 +363,9 @@ def main() -> int:
         _log(f"Parallel mode: {num_parallel} model tracks running simultaneously.")
         if gpu_ids:
             for i, model_name in enumerate(models):
-                _log(f"  {model_name} → CUDA_VISIBLE_DEVICES={gpu_ids[i % len(gpu_ids)]}")
+                _log(
+                    f"  {model_name} → CUDA_VISIBLE_DEVICES={gpu_ids[i % len(gpu_ids)]}"
+                )
         with ThreadPoolExecutor(max_workers=num_parallel) as pool:
             futures = {
                 pool.submit(run_model_track, model_name, i): model_name
@@ -352,7 +375,9 @@ def main() -> int:
                 model_name = futures[future]
                 rc = future.result()
                 if rc != 0 and not args.continue_on_error:
-                    _log(f"[ABORT] model={model_name} failed; stopping remaining tracks.")
+                    _log(
+                        f"[ABORT] model={model_name} failed; stopping remaining tracks."
+                    )
                     return rc
 
     if errors:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -146,3 +147,34 @@ def test_load_dataset_from_cache_selects_consistent_axis_group(
     assert len(dataset) == 2
     assert dataset[0].num_components == 2
     assert dataset[1].num_components == 2
+
+
+def test_load_dataset_from_cache_auto_selects_latest_run_subdirectory(
+    tmp_path: Path,
+) -> None:
+    old_run = tmp_path / "run_old"
+    new_run = tmp_path / "run_new"
+    old_run.mkdir()
+    new_run.mkdir()
+
+    old_tensor = _make_tensor(
+        index=0, slice_label=SliceLabel(task="ioi", corruption="abba")
+    )
+    new_tensor = _make_tensor(
+        index=1, slice_label=SliceLabel(task="ioi", corruption="name_swap")
+    )
+
+    old_file = old_run / "tensor.json"
+    new_file = new_run / "tensor.json"
+    old_file.write_text(json.dumps(old_tensor.to_dict()), encoding="utf-8")
+    new_file.write_text(json.dumps(new_tensor.to_dict()), encoding="utf-8")
+
+    os.utime(old_file, ns=(1, 1))
+    os.utime(new_file, ns=(2, 2))
+
+    dataset = load_dataset_from_cache(tmp_path)
+
+    assert len(dataset) == 1
+    loaded = dataset[0]
+    assert loaded.prompt_pair.x_cln == "clean-1"
+    assert loaded.prompt_pair.slice_label.corruption == "name_swap"
