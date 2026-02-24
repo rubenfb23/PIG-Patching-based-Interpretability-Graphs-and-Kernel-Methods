@@ -146,3 +146,76 @@ body,
   font-size: 11px;
   color: #7f91a4;
 }
+
+/* Causal overlay panel */
+.causal-load-row {
+  margin-bottom: 8px;
+}
+
+.causal-load-row button {
+  background: #0b0f16;
+  border: 1px solid #293548;
+  color: #e8edf2;
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.causal-model {
+  margin-bottom: 6px;
+  word-break: break-all;
+}
+
+.causal-stats {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  color: #9fb0c2;
+  margin-bottom: 8px;
+}
+
+.causal-sig {
+  color: #86efac;
+}
+
+.causal-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #9fb0c2;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.causal-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.causal-mediated {
+  background: #f97316;
+}
+
+.causal-parallel {
+  background: #38bdf8;
+}
+
+.causal-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: #b8c5d4;
+}
+
+.causal-toggles label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}

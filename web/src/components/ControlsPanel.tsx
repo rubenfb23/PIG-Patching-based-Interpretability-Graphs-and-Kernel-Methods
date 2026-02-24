@@ -1,6 +1,12 @@
-import { GraphEdge, GraphFilter, GraphNode, GraphPayload } from "../types";
+import { useRef } from "react";
+import { CausalOverlayMeta, GraphEdge, GraphFilter, GraphNode, GraphPayload } from "../types";
+
+type ModelOption = { label: string; url: string };
 
 type Props = {
+  models: ModelOption[];
+  selectedModelIdx: number;
+  onSelectModel: (idx: number) => void;
   slices: string[];
   filter: GraphFilter;
   graph: GraphPayload | null;
@@ -11,6 +17,18 @@ type Props = {
   isolateLocalCircuit: boolean;
   onToggleIsolate: (enabled: boolean) => void;
   onClearSelection: () => void;
+  causalMeta: CausalOverlayMeta | null;
+  showCausalOverlay: boolean;
+  onToggleCausalOverlay: (enabled: boolean) => void;
+  causalSigOnly: boolean;
+  onToggleCausalSigOnly: (enabled: boolean) => void;
+  causalOnlyMode: boolean;
+  onToggleCausalOnlyMode: (enabled: boolean) => void;
+  causalClassFilter: "all" | "mediated" | "parallel_or_synergy";
+  onSetCausalClassFilter: (v: "all" | "mediated" | "parallel_or_synergy") => void;
+  necessityMin: number;
+  onSetNecessityMin: (v: number) => void;
+  onLoadCausalFile: (file: File) => void;
 };
 
 const toNumber = (value: string): number | undefined => {
@@ -22,6 +40,9 @@ const toNumber = (value: string): number | undefined => {
 };
 
 export function ControlsPanel({
+  models,
+  selectedModelIdx,
+  onSelectModel,
   slices,
   filter,
   graph,
@@ -32,11 +53,38 @@ export function ControlsPanel({
   isolateLocalCircuit,
   onToggleIsolate,
   onClearSelection,
+  causalMeta,
+  showCausalOverlay,
+  onToggleCausalOverlay,
+  causalSigOnly,
+  onToggleCausalSigOnly,
+  causalOnlyMode,
+  onToggleCausalOnlyMode,
+  causalClassFilter,
+  onSetCausalClassFilter,
+  necessityMin,
+  onSetNecessityMin,
+  onLoadCausalFile,
 }: Props) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
   return (
     <aside className="panel">
       <h1>PIG 4D Viewer</h1>
       <p>Explore slice/layer/token/threshold in real time.</p>
+
+      <div className="field">
+        <label>Model</label>
+        <select
+          value={selectedModelIdx}
+          onChange={(ev) => onSelectModel(Number(ev.target.value))}
+        >
+          {models.map((m, i) => (
+            <option key={m.url} value={i}>
+              {m.label}
+            </option>
+          ))}
+        </select>
+      </div>
 
       <div className="field">
         <label>Slice</label>
@@ -142,6 +190,97 @@ export function ControlsPanel({
           <div>slice: {graph.slice}</div>
         </div>
       ) : null}
+
+      <div className="selection-section">
+        <h2>Causal overlay</h2>
+        <div className="causal-load-row">
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+          >
+            {causalMeta ? "Replace JSON" : "Load causal_eval.json"}
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json"
+            style={{ display: "none" }}
+            onChange={(ev) => {
+              const f = ev.target.files?.[0];
+              if (f) onLoadCausalFile(f);
+              ev.target.value = "";
+            }}
+          />
+        </div>
+
+        {causalMeta ? (
+          <>
+            <div className="causal-model muted">{causalMeta.model_name.split("/").pop()}</div>
+            <div className="causal-stats">
+              <span>{causalMeta.num_edges} edges</span>
+              <span className="causal-sig">{causalMeta.num_significant} significant</span>
+            </div>
+            <div className="causal-legend">
+              <span className="causal-dot causal-mediated" />
+              <span>mediated ({causalMeta.num_mediated})</span>
+              <span className="causal-dot causal-parallel" />
+              <span>parallel ({causalMeta.num_parallel})</span>
+            </div>
+            <div className="causal-toggles">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={showCausalOverlay}
+                  onChange={(ev) => onToggleCausalOverlay(ev.target.checked)}
+                />
+                Show overlay
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={causalSigOnly}
+                  onChange={(ev) => onToggleCausalSigOnly(ev.target.checked)}
+                />
+                Significant only
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={causalOnlyMode}
+                  onChange={(ev) => onToggleCausalOnlyMode(ev.target.checked)}
+                />
+                Causal only (fade graph)
+              </label>
+            </div>
+            <div className="field" style={{ marginTop: 8, marginBottom: 6 }}>
+              <label>Classification</label>
+              <select
+                value={causalClassFilter}
+                onChange={(ev) =>
+                  onSetCausalClassFilter(ev.target.value as "all" | "mediated" | "parallel_or_synergy")
+                }
+              >
+                <option value="all">All</option>
+                <option value="parallel_or_synergy">Parallel only (backbone)</option>
+                <option value="mediated">Mediated only</option>
+              </select>
+            </div>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label>Min necessity</label>
+              <input
+                type="number"
+                step="0.05"
+                min="0"
+                max="1"
+                value={necessityMin}
+                onChange={(ev) => onSetNecessityMin(Number(ev.target.value))}
+              />
+            </div>
+          </>
+        ) : (
+          <div className="muted">Load a causal_eval.json to overlay causal edges.</div>
+        )}
+      </div>
 
       <div className="selection-section">
         <h2>Selected node</h2>
