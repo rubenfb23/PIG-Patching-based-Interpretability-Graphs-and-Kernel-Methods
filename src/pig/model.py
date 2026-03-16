@@ -467,30 +467,61 @@ class HookedModel:
         return cache
 
     @torch.no_grad()
-    def score(self, prompt: str, target_token: str) -> float:
-        """Compute the observable O(x) = logit for target token.
+    def _observable_from_logits(
+        self,
+        logits: torch.Tensor,
+        target_token: str,
+        distractor_token: Optional[str] = None,
+    ) -> float:
+        """Compute the scalar observable from last-position logits.
+
+        By default this is the raw target-token logit. When
+        ``distractor_token`` is provided, the observable becomes a logit margin
+        ``target - distractor``. That gives IOI evaluations a more defensible
+        contrast without breaking older call sites.
+        """
+        last_pos_logits = logits[0, -1, :]
+        target_id = self.get_token_id(target_token)
+        target_logit = float(last_pos_logits[target_id].item())
+        if distractor_token is None:
+            return target_logit
+
+        distractor_id = self.get_token_id(distractor_token)
+        distractor_logit = float(last_pos_logits[distractor_id].item())
+        return target_logit - distractor_logit
+
+    @torch.no_grad()
+    def score(
+        self,
+        prompt: str,
+        target_token: str,
+        distractor_token: Optional[str] = None,
+    ) -> float:
+        """Compute the observable O(x) at the final token position.
 
         Args:
             prompt: The input prompt
-            target_token: The target token to get logit for
+            target_token: The target token to score
+            distractor_token: Optional contrast token. When provided, returns
+                a logit margin ``target - distractor`` instead of a raw logit.
 
         Returns:
-            The logit value for the target token at the last position
+            The scalar observable value at the last position
         """
         input_ids = self.tokenize(prompt)
         logits = self.forward(input_ids)
-
-        # Get logit for target token at last position
-        target_id = self.get_token_id(target_token)
-        last_pos_logits = logits[0, -1, :]  # [vocab_size]
-
-        return last_pos_logits[target_id].item()
+        return self._observable_from_logits(
+            logits,
+            target_token=target_token,
+            distractor_token=distractor_token,
+        )
 
     @torch.no_grad()
     def _run_patched_forward(
         self,
         prompt: str,
         target_token: str,
+        distractor_token: Optional[str],
         patch_cache: Optional[ActivationCache],
         patch_nodes: Optional[Iterable[tuple]],
         capture_nodes: Optional[Iterable[tuple]] = None,
@@ -562,9 +593,14 @@ class HookedModel:
             self._patch_positions.clear()
             self._patch_components.clear()
 
-        target_id = self.get_token_id(target_token)
-        last_pos_logits = logits[0, -1, :]
-        return float(last_pos_logits[target_id].item()), capture_cache
+        return (
+            self._observable_from_logits(
+                logits,
+                target_token=target_token,
+                distractor_token=distractor_token,
+            ),
+            capture_cache,
+        )
 
     @torch.no_grad()
     def patched_score(
@@ -573,21 +609,24 @@ class HookedModel:
         target_token: str,
         cache: ActivationCache,
         patch_node: tuple,
+        distractor_token: Optional[str] = None,
     ) -> float:
         """Compute observable with patched activations.
 
         Args:
             prompt: The (corrupted) prompt to run
-            target_token: The target token to get logit for
+            target_token: The target token to score
             cache: Cache containing clean activations to patch in
             patch_node: (layer, token[, node_type[, head]]) position to patch
+            distractor_token: Optional contrast token for margin observables
 
         Returns:
-            The logit value after patching
+            The scalar observable value after patching
         """
         score, _ = self._run_patched_forward(
             prompt=prompt,
             target_token=target_token,
+            distractor_token=distractor_token,
             patch_cache=cache,
             patch_nodes={patch_node},
         )
@@ -600,21 +639,24 @@ class HookedModel:
         target_token: str,
         cache: ActivationCache,
         patch_nodes: set[tuple],
+        distractor_token: Optional[str] = None,
     ) -> float:
         """Compute observable with multiple positions patched.
 
         Args:
             prompt: The (corrupted) prompt to run
-            target_token: The target token to get logit for
+            target_token: The target token to score
             cache: Cache containing clean activations to patch in
             patch_nodes: Set of (layer, token[, node_type[, head]]) positions
+            distractor_token: Optional contrast token for margin observables
 
         Returns:
-            The logit value after patching
+            The scalar observable value after patching
         """
         score, _ = self._run_patched_forward(
             prompt=prompt,
             target_token=target_token,
+            distractor_token=distractor_token,
             patch_cache=cache,
             patch_nodes=patch_nodes,
         )
@@ -627,6 +669,7 @@ class HookedModel:
         target_token: str,
         patch_cache: Optional[ActivationCache],
         patch_nodes: Iterable[tuple],
+        distractor_token: Optional[str] = None,
         capture_nodes: Optional[Iterable[tuple]] = None,
         clamp_cache: Optional[ActivationCache] = None,
         clamp_nodes: Optional[Iterable[tuple]] = None,
@@ -640,6 +683,7 @@ class HookedModel:
         return self._run_patched_forward(
             prompt=prompt,
             target_token=target_token,
+            distractor_token=distractor_token,
             patch_cache=patch_cache,
             patch_nodes=patch_nodes,
             capture_nodes=capture_nodes,

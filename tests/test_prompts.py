@@ -9,6 +9,7 @@ from pig.prompts import (
     PromptPair,
     SliceLabel,
     create_ioi_dataset,
+    get_prompt_pair_distractor,
 )
 
 
@@ -167,6 +168,14 @@ class TestIOIGenerator:
         pair = gen.generate()
         assert pair.y_star == pair.meta["name_s"]
 
+    def test_generated_pair_exposes_distractor(self):
+        """Test that IOI pairs carry the opposite-name distractor."""
+        gen = IOIGenerator(seed=42)
+        pair = gen.generate()
+
+        assert pair.meta["y_distractor"] == pair.meta["name_io"]
+        assert get_prompt_pair_distractor(pair) == pair.meta["name_io"]
+
     def test_reproducibility_with_seed(self):
         """Test that same seed produces same results."""
         gen1 = IOIGenerator(seed=123)
@@ -279,3 +288,14 @@ class TestCreateIOIDataset:
         for p1, p2 in zip(d1, d2):
             assert p1.x_cln == p2.x_cln
             assert p1.y_star == p2.y_star
+
+    def test_missing_or_invalid_distractor_returns_none(self):
+        """Test distractor helper for legacy prompt pairs."""
+        pair = PromptPair(
+            x_cln="John gave to Mary",
+            x_crp="Mary gave to Mary",
+            y_star="John",
+            slice_label=SliceLabel(task="ioi", corruption="name_swap"),
+            meta={},
+        )
+        assert get_prompt_pair_distractor(pair) is None

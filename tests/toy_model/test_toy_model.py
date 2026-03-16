@@ -30,6 +30,17 @@ def test_basic_scoring_api():
     assert not np.isnan(score)
 
 
+def test_margin_scoring_api():
+    model = _make_model()
+    prompt = "John gave the book to Mary . Mary gave it back to"
+    margin = model.score(prompt, "John", distractor_token="Mary")
+    raw_target = model.score(prompt, "John")
+    raw_distractor = model.score(prompt, "Mary")
+
+    assert isinstance(margin, float)
+    assert margin == pytest.approx(raw_target - raw_distractor)
+
+
 def test_cache_and_patch_single_node():
     model = _make_model()
 

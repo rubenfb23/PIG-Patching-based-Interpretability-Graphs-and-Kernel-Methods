@@ -29,7 +29,7 @@ from pig.model import (
     HookedModel,
 )
 from pig.patching import PatchEffectTensor, build_axis_fingerprint
-from pig.prompts import PromptPair
+from pig.prompts import PromptPair, get_prompt_pair_distractor
 
 
 PatchNode = tuple[int, int, str, Optional[int]]
@@ -366,6 +366,53 @@ def summarize_clean_base_effects_by_slice(
     return summary
 
 
+def _slice_count_summary(
+    tensors: Sequence[PatchEffectTensor],
+) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for tensor in tensors:
+        counts[_slice_stratum_id(tensor)] += 1
+    return dict(sorted(counts.items()))
+
+
+def _distribution_balance_metrics(
+    counts: dict[str, int],
+) -> dict[str, float | int | list[str] | None]:
+    values = [int(count) for count in counts.values()]
+    total = int(sum(values))
+    if not values:
+        return {
+            "num_slices": 0,
+            "total": 0,
+            "max_count": 0,
+            "min_count": 0,
+            "max_share": 0.0,
+            "min_share": 0.0,
+            "max_to_min_ratio": None,
+            "zero_count_slices": [],
+        }
+
+    max_count = max(values)
+    min_count = min(values)
+    zero_count_slices = [slice_id for slice_id, count in counts.items() if count == 0]
+    nonzero = [count for count in values if count > 0]
+    max_to_min_ratio: float | None
+    if not nonzero:
+        max_to_min_ratio = None
+    else:
+        max_to_min_ratio = float(max(nonzero) / min(nonzero))
+    return {
+        "num_slices": len(values),
+        "total": total,
+        "max_count": max_count,
+        "min_count": min_count,
+        "max_share": float(max_count / total) if total else 0.0,
+        "min_share": float(min_count / total) if total else 0.0,
+        "max_to_min_ratio": max_to_min_ratio,
+        "zero_count_slices": zero_count_slices,
+    }
+
+
 def build_clean_better_filter_report(
     tensors: Sequence[PatchEffectTensor],
     *,
@@ -376,11 +423,34 @@ def build_clean_better_filter_report(
     """Report clean>base filter sensitivity with and without the filter."""
     all_tensors = list(tensors)
     filtered_tensors = [t for t in all_tensors if t.clean_score > t.base_score]
+    all_counts = _slice_count_summary(all_tensors)
+    filtered_counts = _slice_count_summary(filtered_tensors)
+    slice_retention: dict[str, dict[str, float | int]] = {}
+    total_all = len(all_tensors)
+    total_filtered = len(filtered_tensors)
+    for slice_id in sorted(set(all_counts) | set(filtered_counts)):
+        input_n = int(all_counts.get(slice_id, 0))
+        retained_n = int(filtered_counts.get(slice_id, 0))
+        discarded_n = input_n - retained_n
+        share_before = float(input_n / total_all) if total_all else 0.0
+        share_after = float(retained_n / total_filtered) if total_filtered else 0.0
+        slice_retention[slice_id] = {
+            "input_n": input_n,
+            "retained_n": retained_n,
+            "discarded_n": discarded_n,
+            "retention_rate": float(retained_n / input_n) if input_n else 0.0,
+            "share_before": share_before,
+            "share_after": share_after,
+            "share_shift": share_after - share_before,
+        }
     return {
         "rule": "clean_score > base_score",
         "input_tensors": len(all_tensors),
         "retained_with_filter": len(filtered_tensors),
         "discarded_by_filter": len(all_tensors) - len(filtered_tensors),
+        "retention_rate": (
+            float(len(filtered_tensors) / len(all_tensors)) if all_tensors else 0.0
+        ),
         "without_filter": summarize_clean_base_effects_by_slice(
             all_tensors,
             bootstrap_samples=bootstrap_samples,
@@ -393,6 +463,21 @@ def build_clean_better_filter_report(
             ci_alpha=ci_alpha,
             seed=seed + 1000,
         ),
+        "slice_retention": slice_retention,
+        "balance": {
+            "before_filter": _distribution_balance_metrics(
+                {
+                    slice_id: metrics["input_n"]
+                    for slice_id, metrics in slice_retention.items()
+                }
+            ),
+            "after_filter": _distribution_balance_metrics(
+                {
+                    slice_id: metrics["retained_n"]
+                    for slice_id, metrics in slice_retention.items()
+                }
+            ),
+        },
     }
 
 
@@ -829,10 +914,23 @@ def evaluate_causal_edges(
 
     example_contexts = []
     for pair in prompt_pairs:
+        distractor_token = get_prompt_pair_distractor(pair)
         clean_cache = model.cache_clean_components(pair.x_cln, node_types=required_node_types)
         base_cache = model.cache_clean_components(pair.x_crp, node_types=required_node_types)
-        clean_score = float(model.score(pair.x_cln, pair.y_star))
-        base_score = float(model.score(pair.x_crp, pair.y_star))
+        clean_score = float(
+            model.score(
+                pair.x_cln,
+                pair.y_star,
+                distractor_token=distractor_token,
+            )
+        )
+        base_score = float(
+            model.score(
+                pair.x_crp,
+                pair.y_star,
+                distractor_token=distractor_token,
+            )
+        )
         example_contexts.append(
             {
                 "pair": pair,
@@ -840,6 +938,7 @@ def evaluate_causal_edges(
                 "base_cache": base_cache,
                 "clean_score": clean_score,
                 "base_score": base_score,
+                "distractor_token": distractor_token,
             }
         )
 
@@ -889,6 +988,7 @@ def evaluate_causal_edges(
                 base_cache = context["base_cache"]
                 clean_score = context["clean_score"]
                 base_score = context["base_score"]
+                distractor_token = context["distractor_token"]
 
                 base_v = _get_activation(base_cache, dst_node)
                 clean_v = _get_activation(clean_cache, dst_node)
@@ -900,6 +1000,7 @@ def evaluate_causal_edges(
                     pair.y_star,
                     patch_cache=clean_cache,
                     patch_nodes={src_node},
+                    distractor_token=distractor_token,
                     capture_nodes={dst_node},
                 )
                 patched_v = _get_activation(patched_capture, dst_node)
@@ -924,6 +1025,7 @@ def evaluate_causal_edges(
                     pair.y_star,
                     clean_cache,
                     {dst_node},
+                    distractor_token=distractor_token,
                 )
                 r_v = restoration_fraction(
                     score_v,
@@ -937,6 +1039,7 @@ def evaluate_causal_edges(
                     pair.y_star,
                     clean_cache,
                     {src_node, dst_node},
+                    distractor_token=distractor_token,
                 )
                 r_uv = restoration_fraction(
                     score_uv,
@@ -950,6 +1053,7 @@ def evaluate_causal_edges(
                     pair.y_star,
                     patch_cache=clean_cache,
                     patch_nodes={src_node},
+                    distractor_token=distractor_token,
                     clamp_cache=base_cache,
                     clamp_nodes={dst_node},
                 )

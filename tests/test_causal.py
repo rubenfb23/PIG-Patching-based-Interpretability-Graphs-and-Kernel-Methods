@@ -341,10 +341,17 @@ def test_build_clean_better_filter_report_includes_with_without_and_slices():
     assert report["input_tensors"] == 2
     assert report["retained_with_filter"] == 1
     assert report["discarded_by_filter"] == 1
+    assert report["retention_rate"] == pytest.approx(0.5)
     assert report["without_filter"]["n"] == 2
     assert report["with_filter"]["n"] == 1
     assert "ioi:name_swap" in report["without_filter"]["by_slice"]
     assert "ioi:abba" in report["without_filter"]["by_slice"]
+    assert report["slice_retention"]["ioi:name_swap"]["retained_n"] == 1
+    assert report["slice_retention"]["ioi:abba"]["retained_n"] == 0
+    assert report["slice_retention"]["ioi:abba"]["retention_rate"] == pytest.approx(0.0)
+    assert report["balance"]["before_filter"]["max_to_min_ratio"] == pytest.approx(1.0)
+    assert report["balance"]["after_filter"]["max_to_min_ratio"] == pytest.approx(1.0)
+    assert report["balance"]["after_filter"]["zero_count_slices"] == ["ioi:abba"]
 
 
 def test_split_discovery_evaluation_tensors_stratified_and_disjoint():

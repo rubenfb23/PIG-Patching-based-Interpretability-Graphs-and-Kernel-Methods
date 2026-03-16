@@ -58,6 +58,23 @@ class PromptPair:
         }
 
 
+def get_prompt_pair_distractor(pair: PromptPair) -> str | None:
+    """Return the contrast token for pair-level observables when available.
+
+    IOI-style experiments are more robust when the observable is a logit margin
+    between the correct name and the distractor name instead of the raw target
+    logit alone. We keep this optional to preserve compatibility with older
+    prompt pairs and non-IOI tasks.
+    """
+    value = pair.meta.get("y_distractor")
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized or normalized == pair.y_star:
+        return None
+    return normalized
+
+
 @runtime_checkable
 class CorruptionStrategy(Protocol):
     """Protocol for prompt corruption strategies."""
@@ -245,6 +262,7 @@ class IOIGenerator(PromptGenerator):
         meta = {
             "name_s": name_s,
             "name_io": name_io,
+            "y_distractor": name_io,
             "template": template,
             "action": action,
         }

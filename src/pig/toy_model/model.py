@@ -364,19 +364,47 @@ class ToyHookedModel(nn.Module):
         return cache
 
     @torch.no_grad()
-    def score(self, prompt: str, target_token: str) -> float:
+    def _observable_from_logits(
+        self,
+        logits: torch.Tensor,
+        prompt: str,
+        target_token: str,
+        distractor_token: str | None = None,
+    ) -> float:
+        """Compute a raw-logit or target-vs-distractor margin observable."""
+        target_id = self.get_token_id(target_token)
+        target_logit = float(logits[0, -1, target_id].item())
+        lexical_bonus = self._presence_bonus(prompt, target_token)
+        if distractor_token is None:
+            return target_logit + lexical_bonus
+
+        distractor_id = self.get_token_id(distractor_token)
+        distractor_logit = float(logits[0, -1, distractor_id].item())
+        distractor_bonus = self._presence_bonus(prompt, distractor_token)
+        return (target_logit + lexical_bonus) - (distractor_logit + distractor_bonus)
+
+    @torch.no_grad()
+    def score(
+        self,
+        prompt: str,
+        target_token: str,
+        distractor_token: str | None = None,
+    ) -> float:
         input_ids = self.tokenize(prompt)
         logits = self.forward(input_ids)
-        target_id = self.get_token_id(target_token)
-        model_score = float(logits[0, -1, target_id].item())
-        lexical_bonus = self._presence_bonus(prompt, target_token)
-        return model_score + lexical_bonus
+        return self._observable_from_logits(
+            logits,
+            prompt=prompt,
+            target_token=target_token,
+            distractor_token=distractor_token,
+        )
 
     @torch.no_grad()
     def _run_patched_forward(
         self,
         prompt: str,
         target_token: str,
+        distractor_token: str | None,
         patch_cache: ActivationCache | None,
         patch_nodes: Iterable[tuple] | None,
         capture_nodes: Iterable[tuple] | None = None,
@@ -432,15 +460,21 @@ class ToyHookedModel(nn.Module):
             patch_positions=normalized_patch | normalized_clamp,
             patch_sources=patch_sources,
         )
-        target_id = self.get_token_id(target_token)
-        model_score = float(logits[0, -1, target_id].item())
-        lexical_bonus = self._presence_bonus(prompt, target_token)
         total_patch_bonus = sum(
             self._single_patch_bonus(prompt, target_token, patch_sources[node], node)
             for node in normalized_patch
             if node in patch_sources
         )
-        return model_score + lexical_bonus + total_patch_bonus, capture_cache
+        return (
+            self._observable_from_logits(
+                logits,
+                prompt=prompt,
+                target_token=target_token,
+                distractor_token=distractor_token,
+            )
+            + total_patch_bonus,
+            capture_cache,
+        )
 
     @torch.no_grad()
     def patched_score(
@@ -449,10 +483,12 @@ class ToyHookedModel(nn.Module):
         target_token: str,
         cache: ActivationCache,
         patch_node: tuple,
+        distractor_token: str | None = None,
     ) -> float:
         score, _ = self._run_patched_forward(
             prompt=prompt,
             target_token=target_token,
+            distractor_token=distractor_token,
             patch_cache=cache,
             patch_nodes={patch_node},
         )
@@ -465,10 +501,12 @@ class ToyHookedModel(nn.Module):
         target_token: str,
         cache: ActivationCache,
         patch_nodes: set[tuple],
+        distractor_token: str | None = None,
     ) -> float:
         score, _ = self._run_patched_forward(
             prompt=prompt,
             target_token=target_token,
+            distractor_token=distractor_token,
             patch_cache=cache,
             patch_nodes=patch_nodes,
         )
@@ -481,6 +519,7 @@ class ToyHookedModel(nn.Module):
         target_token: str,
         patch_cache: ActivationCache | None,
         patch_nodes: Iterable[tuple],
+        distractor_token: str | None = None,
         capture_nodes: Iterable[tuple] | None = None,
         clamp_cache: ActivationCache | None = None,
         clamp_nodes: Iterable[tuple] | None = None,
@@ -488,6 +527,7 @@ class ToyHookedModel(nn.Module):
         return self._run_patched_forward(
             prompt=prompt,
             target_token=target_token,
+            distractor_token=distractor_token,
             patch_cache=patch_cache,
             patch_nodes=patch_nodes,
             capture_nodes=capture_nodes,

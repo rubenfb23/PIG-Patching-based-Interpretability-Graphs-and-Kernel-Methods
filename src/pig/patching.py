@@ -28,7 +28,7 @@ from pig.model import (
     TOY_MODEL_ALIASES,
     HookedModel,
 )
-from pig.prompts import PromptPair, SliceLabel
+from pig.prompts import PromptPair, SliceLabel, get_prompt_pair_distractor
 
 PATCH_CACHE_SCHEMA_VERSION = 2
 MODEL_FINGERPRINT_VERSION = 1
@@ -646,8 +646,17 @@ class PatchEffectComputer:
         )
 
         # Compute baseline scores
-        clean_score = self.model.score(prompt_pair.x_cln, prompt_pair.y_star)
-        base_score = self.model.score(prompt_pair.x_crp, prompt_pair.y_star)
+        distractor_token = get_prompt_pair_distractor(prompt_pair)
+        clean_score = self.model.score(
+            prompt_pair.x_cln,
+            prompt_pair.y_star,
+            distractor_token=distractor_token,
+        )
+        base_score = self.model.score(
+            prompt_pair.x_crp,
+            prompt_pair.y_star,
+            distractor_token=distractor_token,
+        )
 
         # Get dimensions
         num_layers = self.model.get_num_layers()
@@ -669,6 +678,7 @@ class PatchEffectComputer:
                         prompt_pair.y_star,
                         clean_cache,
                         patch_node,
+                        distractor_token=distractor_token,
                     )
                     effects[layer, token, comp_idx] = patched_score - base_score
 
