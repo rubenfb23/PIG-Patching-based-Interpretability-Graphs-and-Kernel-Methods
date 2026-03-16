@@ -13,7 +13,8 @@ from typing import Literal, Optional
 import numpy as np
 from numpy.typing import NDArray
 from sklearn.metrics import accuracy_score, roc_auc_score
-from sklearn.model_selection import cross_val_score, learning_curve
+from sklearn.model_selection import StratifiedKFold, cross_val_score, learning_curve
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.svm import SVC
 
@@ -118,6 +119,38 @@ class ClassicalKernelClassifier:
             random_state=self.random_state,
             probability=True,  # Needed for AUC
         )
+
+    def _create_cv_estimator(self) -> SVC | Pipeline:
+        """Create a CV-safe estimator without pre-fitting transforms on all X."""
+        svm = self._create_svm()
+        if not self.normalize:
+            return svm
+        return Pipeline(
+            steps=[
+                ("scaler", StandardScaler()),
+                ("svm", svm),
+            ]
+        )
+
+    def _resolve_cv(
+        self,
+        cv: int | object,
+        y_encoded: NDArray,
+    ) -> int | object:
+        """Resolve integer CV counts into seeded stratified splitters."""
+        if isinstance(cv, int):
+            _, class_counts = np.unique(y_encoded, return_counts=True)
+            max_splits = int(min(np.min(class_counts), len(y_encoded)))
+            if max_splits < 2:
+                raise ValueError(
+                    "Need at least two samples per class to run cross-validation"
+                )
+            return StratifiedKFold(
+                n_splits=min(cv, max_splits),
+                shuffle=True,
+                random_state=self.random_state,
+            )
+        return cv
 
     def fit(
         self,
@@ -254,22 +287,16 @@ class ClassicalKernelClassifier:
         else:
             y_encoded = np.array(y)
 
-        # Normalize
-        if self.normalize:
-            scaler = StandardScaler()
-            X_scaled = scaler.fit_transform(X)
-        else:
-            X_scaled = X
-
-        # Cross-validate
-        svm = self._create_svm()
-        scores = cross_val_score(svm, X_scaled, y_encoded, cv=cv)
+        cv_splitter = self._resolve_cv(cv, y_encoded)
+        estimator = self._create_cv_estimator()
+        scores = cross_val_score(estimator, X, y_encoded, cv=cv_splitter)
+        cv_folds = cv_splitter.get_n_splits(X, y_encoded)
 
         return {
             "accuracy_mean": float(np.mean(scores)),
             "accuracy_std": float(np.std(scores)),
             "kernel_type": self.kernel,
-            "cv_folds": cv,
+            "cv_folds": int(cv_folds),
         }
 
     def learning_curve(
@@ -300,21 +327,15 @@ class ClassicalKernelClassifier:
         else:
             y_encoded = np.array(y)
 
-        # Normalize
-        if self.normalize:
-            scaler = StandardScaler()
-            X_scaled = scaler.fit_transform(X)
-        else:
-            X_scaled = X
-
-        svm = self._create_svm()
+        cv_splitter = self._resolve_cv(cv, y_encoded)
+        estimator = self._create_cv_estimator()
 
         train_sizes_abs, train_scores, test_scores = learning_curve(
-            svm,
-            X_scaled,
+            estimator,
+            X,
             y_encoded,
             train_sizes=train_sizes,
-            cv=cv,
+            cv=cv_splitter,
             shuffle=True,
             random_state=self.random_state,
         )

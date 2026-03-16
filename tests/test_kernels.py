@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from pig.embeddings import WLEmbedding, WLFeatureMatrix
+import pig.kernels as kernels_module
 from pig.kernels import (
     ClassicalKernelClassifier,
     train_classical_baseline,
@@ -141,6 +142,74 @@ class TestClassicalKernelClassifier:
         assert "accuracy_mean" in cv_result
         assert "accuracy_std" in cv_result
         assert cv_result["accuracy_mean"] > 0.5  # Above chance
+
+    def test_cross_validate_uses_pipeline_when_normalized(self, sample_data, monkeypatch):
+        """Test CV uses a fold-local scaler instead of fitting on all data."""
+        X, y = sample_data
+        observed = {}
+
+        def fake_cross_val_score(estimator, X_arg, y_arg, cv):
+            observed["estimator"] = estimator
+            observed["X"] = X_arg
+            observed["y"] = y_arg
+            observed["cv"] = cv
+            return np.array([0.6, 0.7, 0.8], dtype=np.float64)
+
+        monkeypatch.setattr(kernels_module, "cross_val_score", fake_cross_val_score)
+
+        clf = ClassicalKernelClassifier(kernel="linear", random_state=42, normalize=True)
+        cv_result = clf.cross_validate(X, y, cv=3)
+
+        assert hasattr(observed["estimator"], "named_steps")
+        assert list(observed["estimator"].named_steps) == ["scaler", "svm"]
+        np.testing.assert_array_equal(observed["X"], X)
+        np.testing.assert_array_equal(observed["y"], y)
+        assert cv_result["cv_folds"] == 3
+
+    def test_learning_curve_uses_pipeline_when_normalized(self, sample_data, monkeypatch):
+        """Test learning-curve CV also avoids pre-fitting the scaler."""
+        X, y = sample_data
+        observed = {}
+
+        def fake_learning_curve(estimator, X_arg, y_arg, train_sizes, cv, shuffle, random_state):
+            observed["estimator"] = estimator
+            observed["X"] = X_arg
+            observed["y"] = y_arg
+            observed["cv"] = cv
+            return (
+                np.array([5, 10], dtype=np.int32),
+                np.array([[0.9, 0.8], [0.95, 0.9]], dtype=np.float64),
+                np.array([[0.6, 0.7], [0.7, 0.75]], dtype=np.float64),
+            )
+
+        monkeypatch.setattr(kernels_module, "learning_curve", fake_learning_curve)
+
+        clf = ClassicalKernelClassifier(kernel="linear", random_state=42, normalize=True)
+        lc = clf.learning_curve(X, y, train_sizes=np.array([0.5, 1.0]), cv=3)
+
+        assert hasattr(observed["estimator"], "named_steps")
+        assert list(observed["estimator"].named_steps) == ["scaler", "svm"]
+        np.testing.assert_array_equal(observed["X"], X)
+        np.testing.assert_array_equal(observed["y"], y)
+        assert lc.kernel_type == "linear"
+
+    def test_cross_validate_caps_invalid_fold_count(self):
+        """Test requested CV folds are reduced to the valid stratified maximum."""
+        X = np.array(
+            [
+                [0.0, 0.0],
+                [0.1, 0.1],
+                [1.0, 1.0],
+                [1.1, 1.1],
+            ],
+            dtype=np.float32,
+        )
+        y = np.array([0, 0, 1, 1])
+
+        clf = ClassicalKernelClassifier(kernel="linear", random_state=42)
+        result = clf.cross_validate(X, y, cv=5)
+
+        assert result["cv_folds"] == 2
 
     def test_learning_curve(self, sample_data):
         """Test learning curve computation."""
