@@ -218,6 +218,8 @@ class TestGraphBuilder:
         assert isinstance(graph, PatchInfluenceGraph)
         assert graph.num_nodes == 4 * 5  # 4 layers * 5 tokens
         assert graph.slice_label == slice_label
+        assert graph.metadata["graph_role"] == "canonical_slice_graph"
+        assert graph.metadata["construction_mode"] == "slice_correlation"
 
     def test_direction_constraint(self, sample_dataset):
         """Test that direction constraint is enforced."""
@@ -268,6 +270,18 @@ class TestGraphBuilder:
         assert len(graphs) == 1
         slice_label = SliceLabel(task="ioi", corruption="name_swap")
         assert slice_label in graphs
+
+    def test_build_per_example_marks_auxiliary_role(self, sample_dataset):
+        """Test per-example graphs are explicitly marked auxiliary."""
+        builder = GraphBuilder(k=3)
+
+        graphs = builder.build_per_example(sample_dataset)
+
+        assert len(graphs) == len(sample_dataset)
+        graph, label = graphs[0]
+        assert label == SliceLabel(task="ioi", corruption="name_swap")
+        assert graph.metadata["graph_role"] == "auxiliary_per_example_baseline"
+        assert graph.metadata["construction_mode"] == "per_example_similarity"
 
 
 class TestGraphBuilderRegistry:

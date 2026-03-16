@@ -1,7 +1,10 @@
-"""Per-slice graph construction from patch-effect tensors.
+"""Graph construction from patch-effect tensors.
 
-This module builds sparse directed weighted graphs from patch-effect data,
-where edges represent co-influence relationships between patch positions.
+This module builds sparse directed weighted graphs from patch-effect data.
+The canonical publication-facing object is the per-slice graph built by
+``build_from_slice()``, where edges reflect cross-example co-variation of
+patch effects. ``build_per_example()`` remains available as an auxiliary
+classification baseline.
 
 Key features:
 - Fixed node set V across all slices (same patch points)
@@ -327,14 +330,14 @@ class GraphBuilder:
         dataset: PatchEffectDataset,
         slice_label: SliceLabel,
     ) -> PatchInfluenceGraph:
-        """Build a graph for a single slice.
+        """Build the canonical graph for a single slice.
 
         Args:
             dataset: Dataset containing patch-effect tensors
             slice_label: The slice to build the graph for
 
         Returns:
-            PatchInfluenceGraph for this slice
+            PatchInfluenceGraph summarizing slice-level correlations
         """
         tensors = dataset.get_by_slice(slice_label)
         if not tensors:
@@ -380,6 +383,8 @@ class GraphBuilder:
                 "enforce_direction": self.enforce_direction,
                 "num_examples": len(tensors),
                 "graph_builder": self.__class__.__name__,
+                "graph_role": "canonical_slice_graph",
+                "construction_mode": "slice_correlation",
             },
         )
 
@@ -404,10 +409,11 @@ class GraphBuilder:
         self,
         dataset: PatchEffectDataset,
     ) -> list[tuple[PatchInfluenceGraph, SliceLabel]]:
-        """Build one graph per example for classification.
+        """Build one auxiliary graph per example for classification.
 
-        Creates individual graphs where edges are based on effect magnitude
-        rather than cross-example correlation.
+        These graphs are useful as an auxiliary baseline because they provide
+        more samples for classifiers, but they are not the canonical method
+        object used by the main PIG narrative.
 
         Args:
             dataset: Dataset containing patch-effect tensors
@@ -466,6 +472,8 @@ class GraphBuilder:
                     "k": self.k,
                     "example_based": True,
                     "graph_builder": self.__class__.__name__,
+                    "graph_role": "auxiliary_per_example_baseline",
+                    "construction_mode": "per_example_similarity",
                 },
             )
             graphs.append((graph, tensor.prompt_pair.slice_label))
