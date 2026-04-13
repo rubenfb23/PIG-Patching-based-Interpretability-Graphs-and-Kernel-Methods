@@ -280,6 +280,35 @@ def build_notebook() -> dict:
             So the next step is to take this same WL matrix and look at the similarities induced by those kernels.
             """
         ),
+        markdown_cell(
+            """
+            ### Why do we apply `StandardScaler`?
+
+            This is one of the most important design choices in the real pipeline.
+
+            The reason is geometric:
+
+            - the **linear kernel** uses dot products,
+            - the **RBF kernel** uses Euclidean distances,
+            - and both are sensitive to feature scale.
+
+            If one WL feature has a much larger numeric range than the others, it can dominate the similarity computation even if it is not the most informative feature structurally.
+
+            So in the real pipeline we standardize feature-by-feature:
+
+            $$
+            x'_{ij} = \\frac{x_{ij} - \\mu_j}{\\sigma_j}
+            $$
+
+            where:
+
+            - $x_{ij}$ is the original value of feature $j$ in slice $i$,
+            - $\\mu_j$ is the mean of feature $j$,
+            - $\\sigma_j$ is the standard deviation of feature $j$.
+
+            In other words, each column is re-centered and re-scaled so that no single WL feature wins just because of its raw numeric scale.
+            """
+        ),
         code_cell(
             r"""
             scaler = StandardScaler()
@@ -317,6 +346,23 @@ def build_notebook() -> dict:
         ),
         markdown_cell(
             """
+            ### What can we see in the scaling figure?
+
+            - The **left panel** is the actual WL feature block the kernel receives.
+            - The **right panel** is the same block after standardization.
+
+            What changes:
+
+            - raw counts like `0` and `1` become positive or negative z-scores,
+            - a positive number now means “this slice has more of this feature than average,”
+            - a negative number means “this slice has less of this feature than average.”
+
+            So after scaling, the kernel is no longer comparing raw counts directly.
+            It is comparing each slice in terms of **relative over-expression or under-expression of structural patterns**.
+            """
+        ),
+        markdown_cell(
+            """
             ## Stage 4. Linear kernel on the inverse-problem WL matrix
 
             The linear kernel is just a dot product between scaled WL rows:
@@ -350,6 +396,21 @@ def build_notebook() -> dict:
             for i, a in enumerate(slice_names):
                 for j, b in enumerate(slice_names):
                     print(f"  {a:>13} vs {b:<13}: {K_linear[i, j]:+.3f}")
+            """
+        ),
+        markdown_cell(
+            """
+            ### How to read the linear-kernel heatmap
+
+            In this matrix:
+
+            - a **large positive** value means two slices activate similar standardized WL patterns,
+            - a **negative** value means their WL patterns point in opposite directions,
+            - the diagonal is large because each slice is perfectly similar to itself.
+
+            So the main question is not whether values are big in absolute terms, but whether the **relative structure** matches the story we expect.
+
+            Here you can already see that `shared_signal` and `same_circuit` are closer to each other than either is to `other_circuit`.
             """
         ),
         markdown_cell(
@@ -392,6 +453,22 @@ def build_notebook() -> dict:
         ),
         markdown_cell(
             """
+            ### How to read the RBF heatmap
+
+            The RBF kernel turns distances into similarities between `0` and `1`.
+
+            That means:
+
+            - `1.00` means “identical to itself,”
+            - values closer to `1` mean “very close in WL space,”
+            - values closer to `0` mean “far apart.”
+
+            Compared with the linear kernel, the RBF kernel gives a more **local** notion of similarity.
+            It is less about overall direction and more about neighborhood closeness.
+            """
+        ),
+        markdown_cell(
+            """
             ## Stage 6. The same three slices, now seen through three similarity lenses
 
             This is the cleanest way to relate the notebooks:
@@ -427,7 +504,51 @@ def build_notebook() -> dict:
         ),
         markdown_cell(
             """
-            ## Stage 7. Make the classifier geometry visible
+            ### Reality check: this comparison is the real kernel story
+
+            Up to this point, everything is already faithful to the real classical pipeline:
+
+            1. start from a WL matrix,
+            2. scale it,
+            3. compute similarities induced by the kernel.
+
+            This is the core reality.
+
+            The next section with PCA is **not** the real classifier space.
+            It is only a 2D picture that helps us look at a decision boundary with human eyes.
+            """
+        ),
+        markdown_cell(
+            """
+            ## Stage 7. What the real classifier actually does
+
+            In the actual pipeline, we do **not** project to 2D first.
+
+            The real flow is:
+
+            - take the full WL matrix,
+            - fit a `StandardScaler`,
+            - fit an `SVC(kernel="linear")` or `SVC(kernel="rbf")`,
+            - evaluate with cross-validation.
+
+            So before any PCA picture, we expose the actual estimator object used by the repo.
+            """
+        ),
+        code_cell(
+            r"""
+            real_linear_clf = ClassicalKernelClassifier(kernel="linear", random_state=42, normalize=True)
+            real_rbf_clf = ClassicalKernelClassifier(kernel="rbf", random_state=42, normalize=True)
+
+            print("Actual estimator used for CV (linear):")
+            print(real_linear_clf._create_cv_estimator())
+            print()
+            print("Actual estimator used for CV (rbf):")
+            print(real_rbf_clf._create_cv_estimator())
+            """
+        ),
+        markdown_cell(
+            """
+            ## Stage 8. Make the classifier geometry visible
 
             With only three slices, the kernel matrices are easy to read, but they are not great for visualizing a decision boundary.
 
@@ -473,10 +594,15 @@ def build_notebook() -> dict:
         ),
         markdown_cell(
             """
-            ## Stage 8. Linear vs RBF decision geometry
+            ## Stage 9. Linear vs RBF decision geometry
 
             We project the augmented WL cloud to 2D with PCA.
             This is just for visualization; the real classifier still works in full WL space.
+
+            So the rule is:
+
+            - trust the kernel matrices and the actual estimator as the faithful part,
+            - treat the PCA panels as an intuition aid.
             """
         ),
         code_cell(
@@ -538,7 +664,7 @@ def build_notebook() -> dict:
         ),
         markdown_cell(
             """
-            ## Stage 9. Use the same classifier object as the repo
+            ## Stage 10. Use the same classifier object as the repo
 
             Finally, we run the actual `ClassicalKernelClassifier` object on the augmented WL cloud.
 
@@ -559,6 +685,19 @@ def build_notebook() -> dict:
 
             print("Linear CV:", linear_cv)
             print("RBF CV:", rbf_cv)
+            """
+        ),
+        markdown_cell(
+            """
+            ### What should we conclude from the CV result?
+
+            The exact score here is not the main point, because the setup is still toy.
+
+            What matters is that:
+
+            - the same classifier object used by the repo can separate these anchored WL patterns,
+            - both kernels operate directly on full WL rows,
+            - and the notebook has shown both the **real mechanism** and a **visual aid** for intuition.
             """
         ),
         markdown_cell(
