@@ -73,17 +73,18 @@ def build_notebook() -> dict:
             import numpy as np
             import matplotlib.pyplot as plt
 
-            from sklearn.decomposition import PCA
             from sklearn.metrics.pairwise import cosine_similarity, linear_kernel, rbf_kernel
             from sklearn.pipeline import Pipeline
             from sklearn.preprocessing import StandardScaler
             from sklearn.svm import SVC
 
-            from pig.embeddings import compute_wl_features
-            from pig.graph import GraphBuilder
-            from pig.kernels import ClassicalKernelClassifier
+            from pig.embeddings import compute_wl_features, compute_wl_features_from_list
+            from pig.graph import GraphBuilder, create_graph_builder
+            from pig.kernels import ClassicalKernelClassifier, train_classical_baseline
+            from pig.model import create_model
             from pig.patching import ComponentSpec, PatchEffectDataset, PatchEffectTensor
-            from pig.prompts import PromptPair, SliceLabel
+            from pig.prompts import PromptPair, SliceLabel, create_ioi_dataset
+            from pig.patching import compute_patch_effects
 
             plt.style.use("seaborn-v0_8-whitegrid")
             plt.rcParams.update(
@@ -207,6 +208,7 @@ def build_notebook() -> dict:
             feature_matrix = compute_wl_features(graphs, depth=2)
             X_wl = feature_matrix.to_matrix()
             slice_names = [s.corruption for s in feature_matrix.slice_labels]
+            pretty_slice_names = [name.replace("_", " ") for name in slice_names]
 
             feature_var = X_wl.var(axis=0)
             active_idx = [idx for idx in np.argsort(feature_var)[::-1] if feature_var[idx] > 0][:12]
@@ -223,7 +225,7 @@ def build_notebook() -> dict:
             ax.set_xticks(np.arange(len(feature_labels)))
             ax.set_xticklabels(feature_labels, rotation=35, ha="right")
             ax.set_yticks(np.arange(len(slice_names)))
-            ax.set_yticklabels(slice_names)
+            ax.set_yticklabels(pretty_slice_names)
             ax.set_title("Same toy WL matrix we reached in the inverse-problem notebook")
             for i in range(X_wl_view.shape[0]):
                 for j in range(X_wl_view.shape[1]):
@@ -249,9 +251,9 @@ def build_notebook() -> dict:
             fig, ax = plt.subplots(figsize=(5.8, 4.8))
             im = ax.imshow(K_cosine, cmap="magma", vmin=0.0, vmax=1.0)
             ax.set_xticks(np.arange(len(slice_names)))
-            ax.set_xticklabels(slice_names, rotation=35, ha="right")
+            ax.set_xticklabels(pretty_slice_names, rotation=35, ha="right")
             ax.set_yticks(np.arange(len(slice_names)))
-            ax.set_yticklabels(slice_names)
+            ax.set_yticklabels(pretty_slice_names)
             ax.set_title("Cosine similarity over the same toy WL matrix")
             for i in range(K_cosine.shape[0]):
                 for j in range(K_cosine.shape[1]):
@@ -322,7 +324,7 @@ def build_notebook() -> dict:
             axes[0].set_xticks(np.arange(len(feature_labels)))
             axes[0].set_xticklabels(feature_labels, rotation=35, ha="right")
             axes[0].set_yticks(np.arange(len(slice_names)))
-            axes[0].set_yticklabels(slice_names)
+            axes[0].set_yticklabels(pretty_slice_names)
             for i in range(X_wl_view.shape[0]):
                 for j in range(X_wl_view.shape[1]):
                     axes[0].text(j, i, f"{int(X_wl_view[i, j])}", ha="center", va="center", fontsize=9)
@@ -334,7 +336,7 @@ def build_notebook() -> dict:
             axes[1].set_xticks(np.arange(len(feature_labels)))
             axes[1].set_xticklabels(feature_labels, rotation=35, ha="right")
             axes[1].set_yticks(np.arange(len(slice_names)))
-            axes[1].set_yticklabels(slice_names)
+            axes[1].set_yticklabels(pretty_slice_names)
             for i in range(scaled_view.shape[0]):
                 for j in range(scaled_view.shape[1]):
                     axes[1].text(j, i, f"{scaled_view[i, j]:+.1f}", ha="center", va="center", fontsize=8)
@@ -381,9 +383,9 @@ def build_notebook() -> dict:
             fig, ax = plt.subplots(figsize=(5.8, 4.8))
             im = ax.imshow(K_linear, cmap="RdBu_r")
             ax.set_xticks(np.arange(len(slice_names)))
-            ax.set_xticklabels(slice_names, rotation=35, ha="right")
+            ax.set_xticklabels(pretty_slice_names, rotation=35, ha="right")
             ax.set_yticks(np.arange(len(slice_names)))
-            ax.set_yticklabels(slice_names)
+            ax.set_yticklabels(pretty_slice_names)
             ax.set_title("Linear kernel similarity on the same WL matrix")
             for i in range(K_linear.shape[0]):
                 for j in range(K_linear.shape[1]):
@@ -434,9 +436,9 @@ def build_notebook() -> dict:
             fig, ax = plt.subplots(figsize=(5.8, 4.8))
             im = ax.imshow(K_rbf, cmap="magma", vmin=0.0, vmax=1.0)
             ax.set_xticks(np.arange(len(slice_names)))
-            ax.set_xticklabels(slice_names, rotation=35, ha="right")
+            ax.set_xticklabels(pretty_slice_names, rotation=35, ha="right")
             ax.set_yticks(np.arange(len(slice_names)))
-            ax.set_yticklabels(slice_names)
+            ax.set_yticklabels(pretty_slice_names)
             ax.set_title(f"RBF kernel similarity on the same WL matrix (gamma={gamma})")
             for i in range(K_rbf.shape[0]):
                 for j in range(K_rbf.shape[1]):
@@ -487,9 +489,9 @@ def build_notebook() -> dict:
             ]:
                 im = ax.imshow(K, cmap=cmap, vmin=vmin, vmax=vmax)
                 ax.set_xticks(np.arange(len(slice_names)))
-                ax.set_xticklabels(slice_names, rotation=35, ha="right")
+                ax.set_xticklabels(pretty_slice_names, rotation=35, ha="right")
                 ax.set_yticks(np.arange(len(slice_names)))
-                ax.set_yticklabels(slice_names)
+                ax.set_yticklabels(pretty_slice_names)
                 ax.set_title(title)
                 for i in range(K.shape[0]):
                     for j in range(K.shape[1]):
@@ -548,19 +550,19 @@ def build_notebook() -> dict:
         ),
         markdown_cell(
             """
-            ## Stage 8. Make the classifier geometry visible
+            ## Stage 8. Build a tiny training cloud around the real WL anchors
 
-            With only three slices, the kernel matrices are easy to read, but they are not great for visualizing a decision boundary.
+            The real pipeline trains on many WL rows, not just three.
 
-            So here we do something purely pedagogical:
+            So we create a small toy training set that stays faithful to the previous notebook:
 
             - keep the exact three WL rows from the inverse-problem notebook as **anchors**,
             - generate small perturbation copies around them,
-            - and define two families:
-              - **reuse-family**: perturbations around `shared_signal` and `same_circuit`
-              - **other-family**: perturbations around `other_circuit`
+            - and assign labels so that:
+              - **reuse-family** = perturbations around `shared_signal` and `same_circuit`
+              - **other-family** = perturbations around `other_circuit`
 
-            That lets us see the geometry that the kernels are exploiting, while still staying anchored to the exact toy WL rows from the previous notebook.
+            This is still a toy setup, but it lets us fit the exact classifier used by the pipeline and then probe what it does in the **original WL space**.
             """
         ),
         code_cell(
@@ -594,15 +596,42 @@ def build_notebook() -> dict:
         ),
         markdown_cell(
             """
-            ## Stage 9. Linear vs RBF decision geometry
+            ## Stage 9. Probe the real classifier in the original WL space
 
-            We project the augmented WL cloud to 2D with PCA.
-            This is just for visualization; the real classifier still works in full WL space.
+            Instead of projecting to PCA, we now inspect the classifier in the real feature space.
 
-            So the rule is:
+            We use two exact formulas:
 
-            - trust the kernel matrices and the actual estimator as the faithful part,
-            - treat the PCA panels as an intuition aid.
+            Linear SVM decision:
+
+            $$
+            f_{\\mathrm{linear}}(x) = w^\\top x + b
+            $$
+
+            Kernel SVM decision:
+
+            $$
+            f_{\\mathrm{kernel}}(x) = \\sum_{i=1}^{n} \\alpha_i y_i K(x_i, x) + b
+            $$
+
+            where:
+
+            - $x$ is the WL row being evaluated,
+            - $x_i$ are training WL rows,
+            - $y_i$ are class labels,
+            - $\\alpha_i$ are the learned support-vector weights,
+            - $K(\\cdot, \\cdot)$ is the kernel function.
+
+            To make this visible, we take exact interpolation paths in the original WL space:
+
+            $$
+            x(t) = (1 - t) x_a + t x_b, \\qquad t \\in [0, 1]
+            $$
+
+            and evaluate:
+
+            - kernel similarity to the anchor rows,
+            - and the actual SVM decision score along the path.
             """
         ),
         code_cell(
@@ -611,60 +640,151 @@ def build_notebook() -> dict:
             X_aug_scaled = scaler_aug.fit_transform(X_aug)
             X_anchor_scaled = scaler_aug.transform(X_wl)
 
-            pca = PCA(n_components=2, random_state=0)
-            X_2d = pca.fit_transform(X_aug_scaled)
-            X_anchor_2d = pca.transform(X_anchor_scaled)
-
             linear_vis = SVC(kernel="linear", C=1.0)
-            rbf_vis = SVC(kernel="rbf", C=1.0, gamma=0.8)
-            linear_vis.fit(X_2d, y_aug)
-            rbf_vis.fit(X_2d, y_aug)
+            rbf_vis = SVC(kernel="rbf", C=1.0, gamma=0.02)
+            linear_vis.fit(X_aug_scaled, y_aug)
+            rbf_vis.fit(X_aug_scaled, y_aug)
 
-            def plot_decision_boundary(ax, model, title):
-                x_min, x_max = X_2d[:, 0].min() - 1.0, X_2d[:, 0].max() + 1.0
-                y_min, y_max = X_2d[:, 1].min() - 1.0, X_2d[:, 1].max() + 1.0
-                xx, yy = np.meshgrid(
-                    np.linspace(x_min, x_max, 320),
-                    np.linspace(y_min, y_max, 320),
-                )
-                grid = np.c_[xx.ravel(), yy.ravel()]
-                zz = model.decision_function(grid).reshape(xx.shape)
+            t = np.linspace(0.0, 1.0, 101)
+            path_start = anchor_lookup["shared_signal"]
+            path_end = anchor_lookup["other_circuit"]
+            path_points = np.stack([(1.0 - s) * path_start + s * path_end for s in t], axis=0)
+            path_scaled = scaler_aug.transform(path_points)
 
-                ax.contourf(xx, yy, zz > 0, alpha=0.16, levels=1, colors=["#8ecae6", "#f4a261"])
-                ax.contour(xx, yy, zz, levels=[0], colors="black", linewidths=1.5)
+            linear_to_anchors = linear_kernel(path_scaled, X_anchor_scaled)
+            rbf_to_anchors = rbf_kernel(path_scaled, X_anchor_scaled, gamma=0.02)
 
-                colors = np.where(y_aug == 0, "#1d3557", "#d62828")
-                for i in range(len(X_2d)):
-                    ax.scatter(X_2d[i, 0], X_2d[i, 1], s=70, color=colors[i], edgecolor="white", linewidth=0.9)
+            fig, axes = plt.subplots(1, 2, figsize=(13.2, 4.6))
+            for idx, name in enumerate(pretty_slice_names):
+                axes[0].plot(t, linear_to_anchors[:, idx], linewidth=2.2, label=name)
+                axes[1].plot(t, rbf_to_anchors[:, idx], linewidth=2.2, label=name)
 
-                anchor_colors = ["#0f766e", "#0f766e", "#b91c1c"]
-                for i, name in enumerate(slice_names):
-                    ax.scatter(
-                        X_anchor_2d[i, 0],
-                        X_anchor_2d[i, 1],
-                        s=180,
-                        marker="X",
-                        color=anchor_colors[i],
-                        edgecolor="white",
-                        linewidth=1.2,
-                        zorder=5,
-                    )
-                    ax.text(X_anchor_2d[i, 0] + 0.08, X_anchor_2d[i, 1] + 0.08, name, fontsize=9, fontweight="bold")
+            axes[0].set_title("Linear-kernel similarity along a real WL interpolation path")
+            axes[0].set_xlabel("Interpolation parameter t")
+            axes[0].set_ylabel("Linear similarity")
 
-                ax.set_title(title)
-                ax.set_xlabel("PC1")
-                ax.set_ylabel("PC2")
+            axes[1].set_title("RBF-kernel similarity along the same WL path")
+            axes[1].set_xlabel("Interpolation parameter t")
+            axes[1].set_ylabel("RBF similarity")
 
-            fig, axes = plt.subplots(1, 2, figsize=(12.0, 4.8))
-            plot_decision_boundary(axes[0], linear_vis, "Linear SVM over the anchored WL cloud")
-            plot_decision_boundary(axes[1], rbf_vis, "RBF SVM over the anchored WL cloud")
+            for ax in axes:
+                ax.axvline(0.0, color="black", linestyle=":", linewidth=1.0)
+                ax.axvline(1.0, color="black", linestyle=":", linewidth=1.0)
+                ax.legend(title="Anchor row", loc="best")
+
             plt.tight_layout()
             plt.show()
             """
         ),
         markdown_cell(
             """
-            ## Stage 10. Use the same classifier object as the repo
+            ### How to read the interpolation-similarity plots
+
+            These two panels are now showing the **real feature space**, not a projection.
+
+            The horizontal axis is the interpolation parameter $t$:
+
+            - $t = 0$ is exactly the `shared_signal` WL row,
+            - $t = 1$ is exactly the `other_circuit` WL row,
+            - values in between are convex mixtures of those two original WL rows.
+
+            The legend tells you **which anchor row** we are measuring similarity to.
+
+            So, for example, in the left plot:
+
+            - the `shared_signal` curve starts highest at $t=0$ because the path begins there,
+            - the `other_circuit` curve ends highest at $t=1$ because the path finishes there,
+            - the `same_circuit` curve tells you whether the path passes through regions that still look structurally similar to that second reuse-style anchor.
+
+            The difference between the panels is the metric:
+
+            - the **linear panel** reflects signed dot-product similarity after scaling,
+            - the **RBF panel** reflects local closeness in Euclidean distance.
+
+            So these plots are the cleanest “real” picture of what the kernels are doing to a WL row as it moves through feature space.
+            """
+        ),
+        markdown_cell(
+            """
+            ## Stage 10. Exact SVM decision score along real WL-space paths
+
+            The next plot evaluates the actual fitted SVM decision function on two original-space trajectories:
+
+            - `shared_signal` $\\rightarrow$ `other_circuit`
+            - `same_circuit` $\\rightarrow$ `other_circuit`
+
+            Interpretation of the decision score:
+
+            - **positive** score: classifier prefers `other-family`,
+            - **negative** score: classifier prefers `reuse-family`,
+            - **zero crossing**: decision boundary.
+
+            This is more faithful than PCA because the classifier is being queried on actual WL-space points.
+            """
+        ),
+        code_cell(
+            r"""
+            path_specs = [
+                ("shared_signal", "other_circuit", "#1d4ed8"),
+                ("same_circuit", "other_circuit", "#b91c1c"),
+            ]
+
+            fig, axes = plt.subplots(1, 2, figsize=(12.8, 4.6), sharey=True)
+
+            for start_name, end_name, color in path_specs:
+                start = anchor_lookup[start_name]
+                end = anchor_lookup[end_name]
+                points = np.stack([(1.0 - s) * start + s * end for s in t], axis=0)
+                points_scaled = scaler_aug.transform(points)
+
+                linear_scores = linear_vis.decision_function(points_scaled)
+                rbf_scores = rbf_vis.decision_function(points_scaled)
+
+                label = f"{start_name.replace('_', ' ')} → {end_name.replace('_', ' ')}"
+                axes[0].plot(t, linear_scores, color=color, linewidth=2.3, label=label)
+                axes[1].plot(t, rbf_scores, color=color, linewidth=2.3, label=label)
+
+            axes[0].axhline(0.0, color="black", linestyle="--", linewidth=1.0)
+            axes[1].axhline(0.0, color="black", linestyle="--", linewidth=1.0)
+
+            axes[0].set_title("Linear SVM decision score in real WL space")
+            axes[0].set_xlabel("Interpolation parameter t")
+            axes[0].set_ylabel("Decision score")
+            axes[0].legend(title="Path", loc="best")
+
+            axes[1].set_title("RBF SVM decision score in real WL space")
+            axes[1].set_xlabel("Interpolation parameter t")
+            axes[1].legend(title="Path", loc="best")
+
+            plt.tight_layout()
+            plt.show()
+            """
+        ),
+        markdown_cell(
+            """
+            ### How to read the decision-score plots
+
+            Each colored line is one interpolation path between two real anchor WL rows.
+
+            The legend tells you which path you are looking at.
+
+            The dashed horizontal line at `0` is the classifier boundary:
+
+            - below `0`: the point is classified as `reuse-family`,
+            - above `0`: the point is classified as `other-family`.
+
+            What you should look for:
+
+            - where the line crosses `0`,
+            - how abruptly it crosses,
+            - and whether the linear and RBF classifiers transition at similar places.
+
+            If the RBF curve bends differently from the linear curve, that means the nonlinear kernel is carving out a different local notion of similarity, even though both are operating on the same underlying WL vectors.
+            """
+        ),
+        markdown_cell(
+            """
+            ## Stage 11. Use the same classifier object as the repo
 
             Finally, we run the actual `ClassicalKernelClassifier` object on the augmented WL cloud.
 
@@ -697,7 +817,164 @@ def build_notebook() -> dict:
 
             - the same classifier object used by the repo can separate these anchored WL patterns,
             - both kernels operate directly on full WL rows,
-            - and the notebook has shown both the **real mechanism** and a **visual aid** for intuition.
+            - and the notebook has shown the **real mechanism** directly in WL space.
+            """
+        ),
+        markdown_cell(
+            """
+            ## Stage 12. Tiny real-pipeline check on actual repo data
+
+            Up to this point, the notebook has used the exact toy WL anchors from the inverse-problem walkthrough.
+
+            To show that the same kernel block also works on a genuine pipeline output, we now run a **small real check** with the in-repo `toy_transformer`:
+
+            1. generate real IOI prompt pairs,
+            2. compute real patch effects,
+            3. build real per-example graphs,
+            4. compute a real WL feature matrix,
+            5. and run the same classical kernel baselines on it.
+
+            This section is intentionally small and fast.
+            The goal is not to benchmark the model; the goal is to show that the exact same kernel logic survives contact with real pipeline artifacts.
+            """
+        ),
+        markdown_cell(
+            """
+            ### Why use per-example graphs here?
+
+            The classical classifier needs multiple rows to run cross-validation.
+
+            A canonical slice graph gives one graph per corruption slice, which is ideal for structural interpretation but too small for a useful classifier demo.
+
+            So for this final reality check we use the repo's **per-example graph baseline**, which gives one graph per prompt pair and therefore enough WL rows to train and validate the kernel classifier.
+            """
+        ),
+        code_cell(
+            r"""
+            real_prompt_pairs = []
+            for offset, corruption in enumerate(["name_swap", "abba"]):
+                real_prompt_pairs.extend(
+                    create_ioi_dataset(
+                        n_examples=4,
+                        corruption=corruption,
+                        seed=7 + offset * 10_000,
+                    )
+                )
+
+            real_model = create_model("toy_transformer", device="cpu")
+            real_dataset = compute_patch_effects(
+                real_model,
+                real_prompt_pairs,
+                show_progress=False,
+                node_types=["res"],
+            )
+
+            real_builder = create_graph_builder(
+                "correlation_topk",
+                k=3,
+                enforce_direction=True,
+            )
+            real_example_graphs = real_builder.build_per_example(real_dataset)
+            real_feature_matrix = compute_wl_features_from_list(real_example_graphs, depth=3)
+
+            X_real = real_feature_matrix.to_matrix()
+            y_real = np.array([str(label) for label in real_feature_matrix.slice_labels])
+            family_counts = {}
+            pretty_y_real = []
+            for label in y_real:
+                family = label.replace("ioi:", "").replace("_", " ")
+                family_counts[family] = family_counts.get(family, 0) + 1
+                pretty_y_real.append(f"{family} {family_counts[family]}")
+
+            real_var = X_real.var(axis=0)
+            real_active_idx = [idx for idx in np.argsort(real_var)[::-1] if real_var[idx] > 0][:14]
+            X_real_view = X_real[:, real_active_idx]
+            real_feature_labels = [f"f{idx}" for idx in real_active_idx]
+
+            print("Real WL matrix shape:", X_real.shape)
+            print("Real labels:", pretty_y_real)
+
+            fig, ax = plt.subplots(figsize=(10.2, 4.4))
+            im = ax.imshow(X_real_view, aspect="auto", cmap="Blues")
+            ax.set_xticks(np.arange(len(real_feature_labels)))
+            ax.set_xticklabels(real_feature_labels, rotation=35, ha="right")
+            ax.set_yticks(np.arange(len(pretty_y_real)))
+            ax.set_yticklabels(pretty_y_real)
+            ax.set_title("Tiny real WL matrix from the actual toy_transformer pipeline")
+            for i in range(X_real_view.shape[0]):
+                for j in range(X_real_view.shape[1]):
+                    ax.text(j, i, f"{int(X_real_view[i, j])}", ha="center", va="center", fontsize=8)
+            plt.colorbar(im, ax=ax, label="WL feature count")
+            plt.tight_layout()
+            plt.show()
+
+            real_scaler = StandardScaler()
+            X_real_scaled = real_scaler.fit_transform(X_real)
+            K_real_linear = linear_kernel(X_real_scaled, X_real_scaled)
+
+            fig, ax = plt.subplots(figsize=(6.4, 5.2))
+            im = ax.imshow(K_real_linear, cmap="RdBu_r")
+            ax.set_xticks(np.arange(len(pretty_y_real)))
+            ax.set_xticklabels(pretty_y_real, rotation=35, ha="right")
+            ax.set_yticks(np.arange(len(pretty_y_real)))
+            ax.set_yticklabels(pretty_y_real)
+            ax.set_title("Linear-kernel matrix on the tiny real WL matrix")
+            plt.colorbar(im, ax=ax, label="linear-kernel similarity")
+            plt.tight_layout()
+            plt.show()
+
+            _, real_linear_cv = train_classical_baseline(
+                real_feature_matrix,
+                kernel="linear",
+                random_state=7,
+            )
+            _, real_rbf_cv = train_classical_baseline(
+                real_feature_matrix,
+                kernel="rbf",
+                random_state=7,
+            )
+
+            print("Tiny real-check CV (linear):", real_linear_cv)
+            print("Tiny real-check CV (rbf):", real_rbf_cv)
+            """
+        ),
+        markdown_cell(
+            """
+            ### How to read the tiny real-pipeline figures
+
+            In the first plot:
+
+            - each **row** is one real prompt-pair graph from the actual toy-transformer patching pipeline,
+            - each **column** is one active WL feature,
+            - the row labels tell you which corruption family that example belongs to.
+
+            So this is no longer a hand-made toy matrix. It is a real WL matrix produced by repo code.
+
+            In the second plot:
+
+            - each row/column is one real example,
+            - the color shows linear-kernel similarity after scaling,
+            - and block structure is what you want to see.
+
+            If examples from the same label tend to be more similar to each other than to the other label, the kernel has a usable signal to classify.
+            """
+        ),
+        markdown_cell(
+            """
+            ### What does “it works” mean in this final check?
+
+            For this notebook, “it works” does **not** mean “state-of-the-art accuracy”.
+
+            It means something more specific and more defensible:
+
+            - the repo can produce a real WL matrix from real patching outputs,
+            - the kernel can turn that matrix into a structured similarity matrix,
+            - and the same `ClassicalKernelClassifier` used by the pipeline achieves accuracy above chance on that tiny real example set.
+
+            So this final section is the bridge from:
+
+            - **mechanism understanding** in the toy walkthrough,
+            - to **actual repo behavior** on a small but genuine run.
             """
         ),
         markdown_cell(
@@ -709,7 +986,8 @@ def build_notebook() -> dict:
             1. the previous notebook gave us a toy WL matrix over slices,
             2. this notebook reuses that exact WL matrix,
             3. cosine, linear-kernel, and RBF-kernel views are three different similarity lenses over the same rows,
-            4. and the classical kernel stage works by turning those structural similarities into a decision rule.
+            4. the classical kernel stage works by turning those structural similarities into a decision rule,
+            5. and a tiny real-pipeline check shows that the same mechanism produces usable classification signal on actual repo outputs.
 
             So the kernel stage is not a separate mystery.
             It is simply the **next layer of comparison** built on top of the toy WL representation from the inverse-problem notebook.
