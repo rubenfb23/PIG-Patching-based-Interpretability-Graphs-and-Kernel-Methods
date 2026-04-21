@@ -1,0 +1,226 @@
+
+======================================================================
+  STAGE 1 — Prompts  ( x_cln, x_crp, y_star, slice_label )
+======================================================================
+
+Slice labels used:  ioi:name_swap  |  ioi:abba
+Total prompt pairs: 8 (4 per slice)
+
+--- slice: ioi:name_swap (first 2 examples) ---
+  [0] x_cln  = 'Nicole gave the book to Bob. Bob gave it back to'
+       x_crp  = 'Bob gave the book to Bob. Bob gave it back to'
+       y_star = 'Nicole'
+  [1] x_cln  = 'Andrew lent the money to Lisa. Lisa returned it to'
+       x_crp  = 'Lisa lent the money to Lisa. Lisa returned it to'
+       y_star = 'Andrew'
+
+--- slice: ioi:abba (first 2 examples) ---
+  [0] x_cln  = 'Nicole gave the book to Bob. Bob gave it back to'
+       x_crp  = 'Bob gave the book to Nicole. Nicole gave it back to'
+       y_star = 'Nicole'
+  [1] x_cln  = 'Andrew lent the money to Lisa. Lisa returned it to'
+       x_crp  = 'Lisa lent the money to Andrew. Andrew returned it to'
+       y_star = 'Andrew'
+
+
+======================================================================
+  STAGE 2 — Baseline observable  O_i^base = O( f_θ(x_crp) )
+======================================================================
+
+Model: toy_transformer  n_layers=2  n_heads=4  d_model=64
+Observable: logit margin  target - distractor  (y_distractor from meta)
+
+Baseline scores (base_score = O(x_crp)) — first 4 per slice:
+  ioi:name_swap  base_scores = [0.231 1.45  0.123 0.76 ]
+  ioi:abba  base_scores = [1.139 2.278 1.102 1.768]
+
+======================================================================
+  STAGE 3 & 4 — Patched observable O_{i,u}^patch  and  E_u^(i) = O_patch - O_base
+======================================================================
+
+Computing patch effects (residual stream nodes only) ...
+  Computing patch effects: 1/8  Computing patch effects: 2/8  Computing patch effects: 3/8  Computing patch effects: 4/8  Computing patch effects: 5/8  Computing patch effects: 6/8  Computing patch effects: 7/8  Computing patch effects: 8/8
+
+PatchEffectDataset: 8 tensors
+
+First tensor shape (effects): (2, 12, 1)  = [n_layers=2, n_tokens=12, n_components=1]
+  base_score  = 0.2305
+  clean_score = 0.6981
+  token_labels = ['Nicole', 'gave', 'the', 'book', 'to', 'Bob', '.', 'Bob', 'gave', 'it', 'back', 'to']
+
+Flat effect matrix for slice 'ioi:name_swap'  shape [N_s, |V|]:
+  Shape: (4, 22)  (N_s=4, |V|=22)
+  Node ordering: (layer * n_tokens + token) * n_components + comp_idx
+  (With res-only: comp_idx=0 always, so index = layer*11 + token)
+
+  First 4 rows, first 12 columns (columns = node index 0..11):
+     L0T0     L0T1     L0T2     L0T3     L0T4     L0T5     L0T6     L0T7     L0T8     L0T9    L0T10     L1T0
+    0.173   -0.000    0.001    0.000    0.001    0.000    0.000    0.000   -0.000    0.000    0.000    0.350
+    0.146   -0.004   -0.004   -0.002   -0.003   -0.003   -0.001   -0.002   -0.001   -0.001   -0.031    0.350
+    0.144   -0.002   -0.003   -0.001   -0.001   -0.001   -0.002   -0.000   -0.000   -0.000   -0.000    0.350
+    0.213   -0.000   -0.000   -0.000   -0.000    0.001   -0.000    0.001    0.000   -0.000   -0.001    0.350
+
+======================================================================
+  STAGE 5 — Co-influence correlation matrix  C_s[u,v] = corr_i(E_u^(i), E_v^(i))
+======================================================================
+
+Correlation matrix for slice 'ioi:name_swap'  shape: (22, 22)
+(Signed Pearson correlation, denominator N=4, not N-1)
+
+  First 12x12 block:
+              L0T0    L0T1    L0T2    L0T3    L0T4    L0T5    L0T6    L0T7    L0T8    L0T9   L0T10    L1T0
+     L0T0     1.000   0.712   0.655   0.701   0.480   0.782   0.773   0.719   0.720   0.317   0.460   0.000
+     L0T1     0.712   1.000   0.867   0.959   0.956   0.993   0.669   0.998   1.000   0.889   0.936   0.000
+     L0T2     0.655   0.867   1.000   0.973   0.846   0.893   0.906   0.839   0.860   0.784   0.701   0.000
+     L0T3     0.701   0.959   0.973   1.000   0.927   0.970   0.826   0.942   0.955   0.862   0.835   0.000
+     L0T4     0.480   0.956   0.846   0.927   1.000   0.922   0.558   0.948   0.952   0.984   0.967   0.000
+     L0T5     0.782   0.993   0.893   0.970   0.922   1.000   0.742   0.989   0.993   0.839   0.888   0.000
+     L0T6     0.773   0.669   0.906   0.826   0.558   0.742   1.000   0.638   0.664   0.450   0.384   0.000
+     L0T7     0.719   0.998   0.839   0.942   0.948   0.989   0.638   1.000   0.999   0.879   0.942   0.000
+     L0T8     0.720   1.000   0.860   0.955   0.952   0.993   0.664   0.999   1.000   0.883   0.936   0.000
+     L0T9     0.317   0.889   0.784   0.862   0.984   0.839   0.450   0.879   0.883   1.000   0.951   0.000
+    L0T10     0.460   0.936   0.701   0.835   0.967   0.888   0.384   0.942   0.936   0.951   1.000   0.000
+     L1T0     0.000   0.000   0.000   0.000   0.000   0.000   0.000   0.000   0.000   0.000   0.000   0.000
+
+  Matrix diagonal (should be 1.0): [1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 1. 0.]
+  Range: [0.000, 1.000]
+
+Note: Stage 5' (direct-influence / paired patching) — NOT implemented
+Note: Stage 5'' (partial correlation)               — NOT implemented
+
+======================================================================
+  STAGE 6 — Sparse graph  G_s = (V, E_s, w_s)  after top-k + direction constraint
+======================================================================
+
+Sparsification rule: top-k per source node, k=5
+Direction constraint: enforce_direction=True
+  Order rule: src < dst  iff  (layer, token, type_order) is lexicographically less
+  Type order: att=0, mlp=1, res=2
+
+Canonical graph  slice 'ioi:name_swap':
+  Nodes: 22  Edges: 45
+  Edge list (src_idx, dst_idx, weight) — first 10:
+    (  0 L0T0.res,   1 L0T1.res, w=+0.7123)
+    (  0 L0T0.res,   5 L0T5.res, w=+0.7821)
+    (  0 L0T0.res,   6 L0T6.res, w=+0.7728)
+    (  0 L0T0.res,   7 L0T7.res, w=+0.7185)
+    (  0 L0T0.res,   8 L0T8.res, w=+0.7197)
+    (  1 L0T1.res,   3 L0T3.res, w=+0.9589)
+    (  1 L0T1.res,   4 L0T4.res, w=+0.9560)
+    (  1 L0T1.res,   5 L0T5.res, w=+0.9929)
+    (  1 L0T1.res,   7 L0T7.res, w=+0.9983)
+    (  1 L0T1.res,   8 L0T8.res, w=+0.9998)
+
+Canonical graph  slice 'ioi:abba':
+  Nodes: 22  Edges: 45
+  Edge list — first 10:
+    (  0 L0T0.res,   1 L0T1.res, w=+0.7430)
+    (  0 L0T0.res,   2 L0T2.res, w=+0.6812)
+    (  0 L0T0.res,   3 L0T3.res, w=+0.7300)
+    (  0 L0T0.res,   5 L0T5.res, w=-0.9766)
+    (  0 L0T0.res,   7 L0T7.res, w=-0.9996)
+    (  1 L0T1.res,   2 L0T2.res, w=+0.8853)
+    (  1 L0T1.res,   3 L0T3.res, w=+0.9664)
+    (  1 L0T1.res,   4 L0T4.res, w=+0.9512)
+    (  1 L0T1.res,  10 L0T10.res, w=-0.9328)
+    (  1 L0T1.res,  21 L1T10.res, w=-0.9319)
+
+Per-example graphs: 8 total (4 × ioi:name_swap, 4 × ioi:abba)
+
+======================================================================
+  STAGE 7 — WL feature matrix  X[s, (h, l)] = |{v : l^(h)(v) = l}|
+======================================================================
+
+WL depth (iterations): 3
+Feature matrix X shape: (8, 395)  = [n_graphs=8, n_features=395]
+Non-zero columns: 395 out of 395
+
+First 5 rows × 12 informative columns:
+  d0_L0_T0_res  d0_L0_T10_re  d0_L0_T11_re  d0_L0_T1_res  d0_L0_T2_res  d0_L0_T3_res  d0_L0_T4_res  d0_L0_T5_res  d0_L0_T6_res  d0_L0_T7_res  d0_L0_T8_res  d0_L0_T9_res
+  [     ioi:name_swap]             1             1             1             1             1             1             1             1             1             1             1             1
+  [     ioi:name_swap]             1             1             0             1             1             1             1             1             1             1             1             1
+  [     ioi:name_swap]             1             1             1             1             1             1             1             1             1             1             1             1
+  [     ioi:name_swap]             1             1             1             1             1             1             1             1             1             1             1             1
+  [          ioi:abba]             1             1             1             1             1             1             1             1             1             1             1             1
+
+Slice label ordering in X:
+  row 0: ioi:name_swap
+  row 1: ioi:name_swap
+  row 2: ioi:name_swap
+  row 3: ioi:name_swap
+  row 4: ioi:abba
+  row 5: ioi:abba
+  row 6: ioi:abba
+  row 7: ioi:abba
+
+======================================================================
+  STAGE 8 — Kernel matrices  K[s,t]
+======================================================================
+
+[8a] Linear kernel  K_lin[s,t] = x̂_s · x̂_t  (shape (8, 8))
+     (features standardized by StandardScaler before dot product)
+     gamma not applicable
+[[ 0.81  -0.233  0.144  0.105 -0.199 -0.233 -0.196 -0.198]
+ [-0.233  1.35  -0.22  -0.232 -0.237  0.041 -0.234 -0.235]
+ [ 0.144 -0.22   0.799  0.105 -0.2   -0.233 -0.197 -0.198]
+ [ 0.105 -0.232  0.105  0.842 -0.198 -0.231 -0.195 -0.196]
+ [-0.199 -0.237 -0.2   -0.198  0.766 -0.236  0.132  0.171]
+ [-0.233  0.041 -0.233 -0.231 -0.236  1.36  -0.233 -0.235]
+ [-0.196 -0.234 -0.197 -0.195  0.132 -0.233  0.83   0.093]
+ [-0.198 -0.235 -0.198 -0.196  0.171 -0.235  0.093  0.798]]
+
+[8b] RBF kernel  K_rbf[s,t] = exp(-gamma * ||x̂_s - x̂_t||²)  (shape (8, 8))
+     gamma (sklearn 'scale') = 1/(n_features * Var[X_scaled]) = 0.013961
+[[1.    0.    0.001 0.    0.    0.    0.    0.   ]
+ [0.    1.    0.    0.    0.    0.    0.    0.   ]
+ [0.001 0.    1.    0.    0.    0.    0.    0.   ]
+ [0.    0.    0.    1.    0.    0.    0.    0.   ]
+ [0.    0.    0.    0.    1.    0.    0.001 0.001]
+ [0.    0.    0.    0.    0.    1.    0.    0.   ]
+ [0.    0.    0.    0.    0.001 0.    1.    0.   ]
+ [0.    0.    0.    0.    0.001 0.    0.    1.   ]]
+
+[8c] Quantum fidelity kernel  K_q[s,t] = |<0|U(z_s)†U(z_t)|0>|²  (shape (8, 8))
+     n_qubits=4  depth=2  shots=None (exact)
+     reduction: PCA to 4 components then QuantumFeatureMap
+     Circuit: H gates → depth × (Rz(z_i), Rx(z_i), CZ chain)
+[[1.    0.104 0.246 0.1   0.077 0.013 0.105 0.09 ]
+ [0.104 1.    0.032 0.01  0.003 0.482 0.001 0.002]
+ [0.246 0.032 1.    0.334 0.094 0.    0.131 0.107]
+ [0.1   0.01  0.334 1.    0.011 0.021 0.019 0.014]
+ [0.077 0.003 0.094 0.011 1.    0.    0.952 0.99 ]
+ [0.013 0.482 0.    0.021 0.    1.    0.    0.   ]
+ [0.105 0.001 0.131 0.019 0.952 0.    1.    0.983]
+ [0.09  0.002 0.107 0.014 0.99  0.    0.983 1.   ]]
+
+======================================================================
+  STAGE 9 — Classification  (SVM on precomputed kernel / cross-validation)
+======================================================================
+
+[9a] Linear kernel SVM CV (cv=2):
+     accuracy_mean = 0.875  ± 0.125  (2 folds)
+
+[9b] RBF kernel SVM CV (cv=2):
+     accuracy_mean = 0.875  ± 0.125  (2 folds)
+
+[9c] Quantum kernel SVM CV (cv=2):
+     accuracy_mean = 0.875  ± 0.125  (2 folds)
+
+======================================================================
+  PIPELINE SUMMARY
+======================================================================
+
+Stage 1  | 8 PromptPair objects in 2 slices
+Stage 2  | Baseline observable: logit margin O = logit(y*) - logit(y_distractor)
+Stage 3  | Patched observable matrix:  shape [4, 2, T, 1]  (res-only)
+Stage 4  | Patch-effect tensor E:      shape [4, 22] after flatten
+Stage 5  | Correlation matrix C_s:     shape [22, 22]  (signed Pearson, denom N)
+Stage 5' | Direct-influence DI:        NOT IMPLEMENTED in graph builders
+Stage 5''| Partial correlation PC:     NOT IMPLEMENTED
+Stage 6  | Sparse graph G_s:           top-k=5 per source, direction enforced
+Stage 7  | WL feature matrix X:        shape (8, 395)  depth=3
+Stage 8  | Linear kernel K_lin:        shape (8, 8)
+         | RBF kernel K_rbf:           shape (8, 8)  gamma=0.0140
+         | Quantum kernel K_q:         shape (8, 8)  n_qubits=4 depth=2
+Stage 9  | SVM cross-validation on per-example graphs
+
