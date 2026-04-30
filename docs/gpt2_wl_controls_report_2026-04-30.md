@@ -4,6 +4,8 @@ Fecha: 2026-04-30
 Modelo: `gpt2`
 Configuracion base: `node_types=res`, `k=5`, corrupciones `name_swap` y `abba`, seeds `7,42,123`.
 
+Nota sobre `n`: en este informe, `n` significa numero de prompt pairs por corrupcion y por seed. Como usamos dos corrupciones (`name_swap` y `abba`), `n=20` son `20 + 20 = 40` prompt pairs por seed, y `n=100` son `100 + 100 = 200` prompt pairs por seed.
+
 ## 1. Resumen
 
 Se reviso la parte de representacion de grafos de la pipeline PIG. Antes se usaba principalmente `WL + SVM` sobre grafos auxiliares por ejemplo. Ahora se compararon cuatro familias:
