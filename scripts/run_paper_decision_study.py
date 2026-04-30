@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 import numpy as np
+from scipy.sparse import csr_matrix, diags, eye
+from scipy.sparse.linalg import ArpackNoConvergence, eigsh
 from sklearn.metrics import accuracy_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
@@ -236,6 +238,297 @@ def _wl_matrix(
     return MatrixBundle(X=matrix, y=labels, feature_names=vocabulary)
 
 
+def _dense_adjacency(
+    graph: PatchInfluenceGraph,
+    *,
+    mode: str,
+    symmetric: bool = True,
+) -> np.ndarray:
+    adjacency = np.zeros((graph.num_nodes, graph.num_nodes), dtype=np.float64)
+    for edge in graph.edges:
+        if mode == "weighted":
+            value = edge.weight
+        elif mode == "absolute":
+            value = abs(edge.weight)
+        elif mode == "binary":
+            value = 1.0
+        elif mode == "sign":
+            value = float(np.sign(edge.weight))
+        else:
+            raise ValueError(f"Unknown adjacency mode: {mode}")
+        adjacency[edge.src, edge.dst] += value
+
+    if symmetric:
+        adjacency = adjacency + adjacency.T
+    return adjacency
+
+
+def _sparse_adjacency(
+    graph: PatchInfluenceGraph,
+    *,
+    mode: str,
+    symmetric: bool = True,
+) -> csr_matrix:
+    rows = []
+    cols = []
+    values = []
+    for edge in graph.edges:
+        if mode == "weighted":
+            value = edge.weight
+        elif mode == "absolute":
+            value = abs(edge.weight)
+        elif mode == "binary":
+            value = 1.0
+        elif mode == "sign":
+            value = float(np.sign(edge.weight))
+        else:
+            raise ValueError(f"Unknown adjacency mode: {mode}")
+        rows.append(edge.src)
+        cols.append(edge.dst)
+        values.append(value)
+
+    adjacency = csr_matrix(
+        (values, (rows, cols)),
+        shape=(graph.num_nodes, graph.num_nodes),
+        dtype=np.float64,
+    )
+    if symmetric:
+        adjacency = adjacency + adjacency.T
+    return adjacency
+
+
+def _pad_vector(values: np.ndarray, size: int) -> np.ndarray:
+    padded = np.zeros(size, dtype=np.float64)
+    count = min(size, values.size)
+    if count:
+        padded[:count] = values[:count]
+    return padded
+
+
+def _extreme_eigenpairs(
+    matrix: csr_matrix,
+    *,
+    num_values: int,
+    which: str,
+    with_vectors: bool,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    n = matrix.shape[0]
+    k = min(num_values, n)
+    if k == 0:
+        empty_vectors = np.zeros((n, 0), dtype=np.float64) if with_vectors else None
+        return np.zeros(0, dtype=np.float64), empty_vectors
+
+    # ARPACK requires k < n. For tiny graphs, dense fallback is simpler and exact.
+    if k >= n:
+        dense = matrix.toarray()
+        values, vectors = np.linalg.eigh(dense)
+    else:
+        try:
+            values, vectors = eigsh(
+                matrix,
+                k=k,
+                which=which,
+                return_eigenvectors=True,
+                tol=1e-4,
+                maxiter=max(1000, 20 * n),
+            )
+        except ArpackNoConvergence as exc:
+            if exc.eigenvalues.size >= k:
+                values = exc.eigenvalues
+                vectors = exc.eigenvectors
+            else:
+                dense = matrix.toarray()
+                values, vectors = np.linalg.eigh(dense)
+
+    order = np.argsort(values)
+    if which in {"LA", "LM"}:
+        order = order[-k:]
+    else:
+        order = order[:k]
+    values = values[order]
+    vectors = vectors[:, order]
+    return values, vectors if with_vectors else None
+
+
+def _spectral_features(
+    graph: PatchInfluenceGraph,
+    *,
+    num_values: int,
+) -> np.ndarray:
+    """Compute compact spectral shape features from graph matrices."""
+    abs_adjacency = _sparse_adjacency(graph, mode="absolute", symmetric=True)
+    signed_adjacency = _sparse_adjacency(graph, mode="sign", symmetric=True)
+
+    degree = np.asarray(abs_adjacency.sum(axis=1)).ravel()
+    inv_sqrt = np.zeros_like(degree)
+    positive = degree > 1e-12
+    inv_sqrt[positive] = 1.0 / np.sqrt(degree[positive])
+    scale = diags(inv_sqrt)
+    normalized = scale @ abs_adjacency @ scale
+    laplacian = eye(graph.num_nodes, dtype=np.float64, format="csr") - normalized
+
+    lap_low, low_vectors = _extreme_eigenpairs(
+        laplacian,
+        num_values=num_values,
+        which="SA",
+        with_vectors=True,
+    )
+    lap_high, high_vectors = _extreme_eigenpairs(
+        laplacian,
+        num_values=num_values,
+        which="LA",
+        with_vectors=True,
+    )
+    signed_low, _ = _extreme_eigenpairs(
+        signed_adjacency,
+        num_values=num_values,
+        which="SA",
+        with_vectors=False,
+    )
+    signed_high, _ = _extreme_eigenpairs(
+        signed_adjacency,
+        num_values=num_values,
+        which="LA",
+        with_vectors=False,
+    )
+
+    low_ipr = np.sum(low_vectors**4, axis=0) if low_vectors is not None else lap_low
+    high_ipr = np.sum(high_vectors**4, axis=0) if high_vectors is not None else lap_high
+
+    return np.concatenate(
+        [
+            _pad_vector(lap_low, num_values),
+            _pad_vector(lap_high, num_values),
+            _pad_vector(signed_low, num_values),
+            _pad_vector(signed_high, num_values),
+            _pad_vector(low_ipr, num_values),
+            _pad_vector(high_ipr, num_values),
+        ],
+    ).astype(np.float32)
+
+
+def _spectral_matrix(
+    graphs_with_labels: list[tuple[PatchInfluenceGraph, SliceLabel]],
+    *,
+    num_values: int,
+) -> MatrixBundle:
+    matrix = np.stack(
+        [
+            _spectral_features(graph, num_values=num_values)
+            for graph, _ in graphs_with_labels
+        ]
+    )
+    labels = [label for _, label in graphs_with_labels]
+    actual_values = matrix.shape[1] // 6
+    feature_names = (
+        [f"lap_low_{idx}" for idx in range(actual_values)]
+        + [f"lap_high_{idx}" for idx in range(actual_values)]
+        + [f"signed_adj_low_{idx}" for idx in range(actual_values)]
+        + [f"signed_adj_high_{idx}" for idx in range(actual_values)]
+        + [f"lap_low_ipr_{idx}" for idx in range(actual_values)]
+        + [f"lap_high_ipr_{idx}" for idx in range(actual_values)]
+    )
+    return MatrixBundle(X=matrix, y=labels, feature_names=feature_names)
+
+
+def _safe_stats(values: np.ndarray) -> list[float]:
+    if values.size == 0:
+        return [0.0, 0.0, 0.0, 0.0]
+    mean = float(np.mean(values))
+    std = float(np.std(values))
+    max_value = float(np.max(values))
+    if std <= 1e-12:
+        skew = 0.0
+    else:
+        skew = float(np.mean(((values - mean) / std) ** 3))
+    return [mean, std, max_value, skew]
+
+
+def _graphlet_features(graph: PatchInfluenceGraph) -> np.ndarray:
+    """Compute low-dimensional 3-node graphlet and degree statistics."""
+    binary = _dense_adjacency(graph, mode="binary", symmetric=True)
+    binary = (binary > 0).astype(np.float64)
+    n = graph.num_nodes
+    m = int(np.sum(binary) / 2)
+
+    total_triplets = n * (n - 1) * (n - 2) / 6 if n >= 3 else 0.0
+    degree = binary.sum(axis=1)
+    wedge_center_count = float(np.sum(degree * (degree - 1) / 2))
+    triangles = float(np.trace(binary @ binary @ binary) / 6.0)
+    two_edge = max(wedge_center_count - 3.0 * triangles, 0.0)
+    one_edge = max(m * (n - 2) - 2.0 * two_edge - 3.0 * triangles, 0.0)
+    zero_edge = max(total_triplets - one_edge - two_edge - triangles, 0.0)
+    triplet_den = max(total_triplets, 1.0)
+    wedge_den = max(wedge_center_count, 1.0)
+
+    weights = np.array([edge.weight for edge in graph.edges], dtype=np.float64)
+    pos_weights = weights[weights > 0]
+    neg_weights = weights[weights < 0]
+    abs_weights = np.abs(weights)
+
+    signed = _dense_adjacency(graph, mode="sign", symmetric=True)
+    pos_degree = (signed > 0).sum(axis=1).astype(np.float64)
+    neg_degree = (signed < 0).sum(axis=1).astype(np.float64)
+
+    features = [
+        float(n),
+        float(m),
+        float(m / max(n * (n - 1) / 2, 1.0)),
+        zero_edge / triplet_den,
+        one_edge / triplet_den,
+        two_edge / triplet_den,
+        triangles / triplet_den,
+        triangles / wedge_den,
+        float(len(pos_weights) / max(len(weights), 1)),
+        float(len(neg_weights) / max(len(weights), 1)),
+        *_safe_stats(degree),
+        *_safe_stats(pos_degree),
+        *_safe_stats(neg_degree),
+        *_safe_stats(weights),
+        *_safe_stats(abs_weights),
+        *_safe_stats(pos_weights),
+        *_safe_stats(np.abs(neg_weights)),
+    ]
+    return np.array(features, dtype=np.float32)
+
+
+def _graphlet_matrix(
+    graphs_with_labels: list[tuple[PatchInfluenceGraph, SliceLabel]],
+) -> MatrixBundle:
+    matrix = np.stack([_graphlet_features(graph) for graph, _ in graphs_with_labels])
+    labels = [label for _, label in graphs_with_labels]
+    feature_names = [
+        "num_nodes",
+        "num_edges",
+        "density",
+        "triplets_0_edges",
+        "triplets_1_edge",
+        "triplets_2_edges",
+        "triangles",
+        "transitivity",
+        "positive_edge_fraction",
+        "negative_edge_fraction",
+    ]
+    for prefix in (
+        "degree",
+        "positive_degree",
+        "negative_degree",
+        "weight",
+        "abs_weight",
+        "positive_weight",
+        "negative_abs_weight",
+    ):
+        feature_names.extend(
+            [
+                f"{prefix}_mean",
+                f"{prefix}_std",
+                f"{prefix}_max",
+                f"{prefix}_skew",
+            ]
+        )
+    return MatrixBundle(X=matrix, y=labels, feature_names=feature_names)
+
+
 def _fit_eval_svm(
     train: MatrixBundle,
     test: MatrixBundle,
@@ -303,8 +596,8 @@ def _null_test_accuracy(
             )["accuracy"]
         )
     return {
-        "accuracy_mean": float(np.mean(values)) if values else 0.0,
-        "accuracy_std": float(np.std(values)) if values else 0.0,
+        "accuracy_mean": float(np.mean(values)) if values else float("nan"),
+        "accuracy_std": float(np.std(values)) if values else float("nan"),
         "values": values,
         "repeats": int(repeats),
     }
@@ -321,6 +614,7 @@ def _evaluate_seed(
     sample_fraction: float,
     min_examples: int,
     wl_depth: int,
+    spectral_values: int,
     null_repeats: int,
 ) -> dict:
     train_dataset, test_dataset, split_meta = _split_dataset_by_slice(
@@ -358,6 +652,20 @@ def _evaluate_seed(
     wl_test = _wl_matrix(test_graphs, depth=wl_depth, vocabulary=wl_train.feature_names)
     result["metrics"]["wl_bootstrap"] = {
         kernel: _fit_eval_svm(wl_train, wl_test, kernel=kernel, seed=seed)
+        for kernel in ("linear", "rbf")
+    }
+
+    spectral_train = _spectral_matrix(train_graphs, num_values=spectral_values)
+    spectral_test = _spectral_matrix(test_graphs, num_values=spectral_values)
+    result["metrics"]["spectral_shape"] = {
+        kernel: _fit_eval_svm(spectral_train, spectral_test, kernel=kernel, seed=seed)
+        for kernel in ("linear", "rbf")
+    }
+
+    graphlet_train = _graphlet_matrix(train_graphs)
+    graphlet_test = _graphlet_matrix(test_graphs)
+    result["metrics"]["graphlet_shape"] = {
+        kernel: _fit_eval_svm(graphlet_train, graphlet_test, kernel=kernel, seed=seed)
         for kernel in ("linear", "rbf")
     }
 
@@ -407,6 +715,10 @@ def _write_summary(path: Path, rows: list[dict]) -> None:
         "fixed_binary_rbf",
         "fixed_sign_linear",
         "fixed_sign_rbf",
+        "spectral_linear",
+        "spectral_rbf",
+        "graphlet_linear",
+        "graphlet_rbf",
         "fixed_weighted_edge_shuffle_linear",
         "fixed_weighted_weight_shuffle_linear",
     ]
@@ -434,6 +746,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bootstrap-sample-fraction", type=float, default=0.75)
     parser.add_argument("--bootstrap-min-examples", type=int, default=3)
     parser.add_argument("--wl-depth", type=int, default=3)
+    parser.add_argument("--spectral-values", type=int, default=16)
     parser.add_argument("--null-repeats", type=int, default=10)
     parser.add_argument("--cache-root", default=None)
     parser.add_argument("--output-dir", default=None)
@@ -512,6 +825,7 @@ def main() -> None:
                         sample_fraction=args.bootstrap_sample_fraction,
                         min_examples=args.bootstrap_min_examples,
                         wl_depth=args.wl_depth,
+                        spectral_values=args.spectral_values,
                         null_repeats=args.null_repeats,
                     )
                     report = {
@@ -559,6 +873,18 @@ def main() -> None:
                             "fixed_sign_rbf": metrics["fixed_layout_sign_topology"][
                                 "rbf"
                             ]["accuracy"],
+                            "spectral_linear": metrics["spectral_shape"]["linear"][
+                                "accuracy"
+                            ],
+                            "spectral_rbf": metrics["spectral_shape"]["rbf"][
+                                "accuracy"
+                            ],
+                            "graphlet_linear": metrics["graphlet_shape"]["linear"][
+                                "accuracy"
+                            ],
+                            "graphlet_rbf": metrics["graphlet_shape"]["rbf"][
+                                "accuracy"
+                            ],
                             "fixed_weighted_edge_shuffle_linear": weighted_nulls[
                                 "edge_shuffle"
                             ]["accuracy_mean"],
