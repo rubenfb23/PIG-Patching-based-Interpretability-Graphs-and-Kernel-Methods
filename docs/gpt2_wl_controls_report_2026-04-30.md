@@ -264,17 +264,22 @@ h_u^{(t)}
 Actualizacion:
 
 ```math
-h_v^{(t+1)}
+z_v^{(t)}
 =
-\mathrm{ReLU}
-\left(
-W_{\mathrm{self}}^{(t)} h_v^{(t)}
+W_s^{(t)} \cdot h_v^{(t)}
 +
-W_{\mathrm{msg}}^{(t)} m_v^{(t)}
+W_m^{(t)} \cdot m_v^{(t)}
 +
 b^{(t)}
-\right)
 ```
+
+```math
+h_v^{(t+1)}
+=
+\mathrm{ReLU}(z_v^{(t)})
+```
+
+Donde `W_s` aplica la transformacion del propio nodo y `W_m` aplica la transformacion del mensaje recibido.
 
 Pooling:
 
