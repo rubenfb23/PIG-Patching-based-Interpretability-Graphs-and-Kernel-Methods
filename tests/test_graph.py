@@ -8,6 +8,7 @@ from pig.graph import (
     GraphBuilder,
     Node,
     PatchInfluenceGraph,
+    build_bootstrap_slice_graphs,
     build_graphs_for_builders,
     create_graph_builder,
     get_available_graph_builders,
@@ -103,7 +104,9 @@ class TestPatchInfluenceGraph:
     @pytest.fixture
     def sample_graph(self):
         """Create a sample graph for testing."""
-        nodes = [Node(layer=l, token=t) for l in range(2) for t in range(3)]
+        nodes = [
+            Node(layer=layer, token=token) for layer in range(2) for token in range(3)
+        ]
         edges = [
             Edge(src=0, dst=3, weight=0.8),
             Edge(src=1, dst=4, weight=0.6),
@@ -282,6 +285,26 @@ class TestGraphBuilder:
         assert label == SliceLabel(task="ioi", corruption="name_swap")
         assert graph.metadata["graph_role"] == "auxiliary_per_example_baseline"
         assert graph.metadata["construction_mode"] == "per_example_similarity"
+
+    def test_build_bootstrap_slice_graphs_marks_auxiliary_role(self, sample_dataset):
+        """Test bootstrap graphs keep slice-correlation semantics."""
+        builder = GraphBuilder(k=3)
+
+        graphs = build_bootstrap_slice_graphs(
+            sample_dataset,
+            builder,
+            graphs_per_slice=4,
+            sample_fraction=0.5,
+            min_examples=3,
+            seed=7,
+        )
+
+        assert len(graphs) == 4
+        graph, label = graphs[0]
+        assert label == SliceLabel(task="ioi", corruption="name_swap")
+        assert graph.metadata["graph_role"] == "auxiliary_bootstrap_slice_baseline"
+        assert graph.metadata["construction_mode"] == "bootstrap_slice_correlation"
+        assert graph.metadata["bootstrap_sample_size"] == 5
 
 
 class TestGraphBuilderRegistry:
