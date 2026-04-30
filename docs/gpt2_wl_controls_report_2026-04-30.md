@@ -350,36 +350,19 @@ Lectura:
 
 ## 6. Experimento A: `n=20`, bootstrap-CV inicial
 
-Configuracion:
+Este experimento queda solo como preliminar. Sirve para explicar por que se sospecho del `1.000` de fixed-layout y por que se diseno el test `n=100` con split disjunto.
 
-- `20` ejemplos por corrupcion.
-- `40` ejemplos por seed.
-- `12` grafos bootstrap por slice.
-- `24` grafos bootstrap por seed.
-- CV estratificado sobre grafos bootstrap.
+Configuracion: `20` ejemplos por corrupcion, `12` grafos bootstrap por slice y CV estratificado sobre grafos bootstrap.
 
 Resultados medios:
 
-| Representacion | Linear | RBF | Lectura |
-|---|---:|---:|---|
-| WL per-example | 0.6667 | 0.6250 | Baseline historico, senal moderada |
-| WL bootstrap-slice | 0.8000 | 0.4867 | Mejor linear, RBF inestable |
-| Fixed-layout weighted | 1.0000 | 0.8433 | Demasiado alto para claim principal |
+| Representacion | Linear | Lectura |
+|---|---:|---|
+| WL per-example | 0.6667 | Baseline historico |
+| WL bootstrap-slice | 0.8000 | Mejor baseline WL |
+| Fixed-layout weighted | 1.0000 | Demasiado optimista |
 
-Null deltas, linear:
-
-| Representacion | Label delta | Edge delta | Weight delta |
-|---|---:|---:|---:|
-| WL per-example | 0.1617 | 0.1783 | 0.1283 |
-| WL bootstrap-slice | 0.3913 | 0.3767 | 0.3667 |
-| Fixed-layout weighted | 0.5240 | 0.5133 | 0.0653 |
-
-Interpretacion:
-
-- `WL per-example` reproduce el baseline anterior.
-- `WL bootstrap-slice` es metodologicamente mas cercano al grafo PIG.
-- `fixed-layout weighted = 1.0000` no debe usarse como claim fuerte porque bootstrap-CV mezcla grafos derivados de los mismos ejemplos base.
-- El `weight delta` bajo de fixed-layout indica que parte de la senal venia de topologia/layout, no de pesos finos.
+Lectura: no se usa para decidir el paper. El CV sobre bootstraps puede mezclar train/test derivados de los mismos ejemplos base. La decision final se toma con `n=100` y split disjunto.
 
 ## 7. Experimento B: GNN sobre bootstrap graphs
 
