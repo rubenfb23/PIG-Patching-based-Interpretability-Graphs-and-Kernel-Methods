@@ -885,3 +885,194 @@ uv run python scripts/run_gnn_representation_study.py \
   --gnn-epochs 150 \
   --null-repeats 5
 ```
+
+## Anexo: decision para paper con 100 ejemplos
+
+Despues de revisar el `1.000` de fixed-layout, se hizo una prueba mas fuerte con `100` ejemplos por corrupcion. El objetivo era decidir si fixed-layout merece entrar al paper y, si entra, con que interpretacion.
+
+La prueba anterior con `20` ejemplos usaba bootstrap-CV. Eso mezcla en train/test grafos bootstrap derivados de los mismos ejemplos base. Por tanto, podia inflar la accuracy aunque no hubiera un bug directo en las features.
+
+### Nuevo test
+
+Para cada seed y cada corrupcion:
+
+```math
+D_s
+=
+D_s^{\mathrm{train}}
+\cup
+D_s^{\mathrm{test}}
+```
+
+con:
+
+```math
+D_s^{\mathrm{train}}
+\cap
+D_s^{\mathrm{test}}
+=
+\emptyset
+```
+
+Configuracion:
+
+- `100` ejemplos por corrupcion.
+- `80` ejemplos train y `20` ejemplos test por corrupcion.
+- `32` grafos bootstrap por slice en train.
+- `32` grafos bootstrap por slice en test.
+- `64` grafos train y `64` grafos test por seed.
+- Seeds: `7`, `42`, `123`.
+- Modelo: `gpt2`.
+- Nodos: `res`.
+- `k=5`.
+- Split antes del bootstrap, no despues.
+
+La ruta evaluada fue:
+
+```text
+100 ejemplos por corrupcion
+    |
+    v
+split disjunto por ejemplos base
+    |
+    +--> train examples --> bootstrap train graphs --> fit SVM
+    |
+    +--> test examples  --> bootstrap test graphs  --> evaluate
+```
+
+Esto evita que un grafo de test use los mismos prompts base que los grafos de train.
+
+### Variantes de fixed-layout
+
+Se probaron tres versiones:
+
+1. Pesos continuos:
+
+```math
+\phi_{uv}(G) = w_{uv}
+```
+
+2. Topologia binaria:
+
+```math
+\phi_{uv}(G)
+=
+\mathbf{1}[(u,v) \in E]
+```
+
+3. Signo:
+
+```math
+\phi_{uv}(G)
+=
+\mathrm{sign}(w_{uv})
+```
+
+La version binaria pregunta:
+
+```text
+Solo saber que aristas existen, sin pesos, separa las corrupciones?
+```
+
+La version de signo pregunta:
+
+```text
+Saber si la correlacion es positiva o negativa aporta mas estabilidad que el peso exacto?
+```
+
+Tambien se hizo test-time null control sobre fixed-layout weighted:
+
+- `edge_shuffle`: barajar endpoints de aristas en test.
+- `weight_shuffle`: mantener topologia de test pero barajar pesos entre aristas.
+
+En estos controles el modelo se entrena con train real y se evalua sobre test perturbado.
+
+### Resultados
+
+Resultados por seed:
+
+| Seed | WL linear | WL RBF | Weighted linear | Binary linear | Sign linear | Edge-shuffle test | Weight-shuffle test |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 7 | 0.7969 | 0.8281 | 0.9531 | 0.9844 | 1.0000 | 0.5000 | 0.5000 |
+| 42 | 0.5469 | 0.5156 | 0.6562 | 0.8281 | 0.9688 | 0.5000 | 0.5063 |
+| 123 | 0.9531 | 0.5000 | 1.0000 | 0.9844 | 1.0000 | 0.5000 | 0.5000 |
+
+Medias:
+
+| Representacion | Accuracy media | Std | Lectura |
+|---|---:|---:|---|
+| WL bootstrap linear | 0.7656 | 0.1673 | Senal razonable, variable por seed |
+| WL bootstrap RBF | 0.6146 | 0.1511 | No estable |
+| Fixed weighted linear | 0.8698 | 0.1522 | Fuerte, pero menos estable que signo/binario |
+| Fixed weighted RBF | 0.5000 | 0.0000 | No sirve aqui |
+| Fixed binary topology linear | 0.9323 | 0.0737 | Muy fuerte: la mascara topologica separa slices |
+| Fixed sign topology linear | 0.9896 | 0.0147 | Mejor resultado y mas estable |
+| Edge-shuffle test | 0.5000 | 0.0000 | Si destruimos topologia, cae a azar |
+| Weight-shuffle test | 0.5021 | 0.0029 | Si destruimos asignacion de pesos, cae a azar |
+
+Visualmente:
+
+```text
+Example-disjoint n=100, linear
+WL bootstrap        ########-- 0.766
+Fixed weighted      #########- 0.870
+Fixed binary        #########- 0.932
+Fixed sign          ########## 0.990
+
+Test-time controls sobre fixed weighted
+Edge shuffle        #####----- 0.500
+Weight shuffle      #####----- 0.502
+```
+
+### Interpretacion actualizada
+
+El `1.000` anterior no era una prueba suficiente porque venia de bootstrap-CV con solo `20` ejemplos por corrupcion. Con `100` ejemplos y split disjunto, la conclusion se vuelve mas matizada:
+
+- Fixed-layout sigue siendo fuerte incluso cuando train/test no comparten ejemplos base.
+- La version mas robusta no es el peso continuo, sino el signo de cada edge slot.
+- La topologia binaria por si sola ya separa muy bien.
+- RBF no funciona bien en fixed-layout; la decision para paper deberia usar linear.
+- Los controles de test caen a azar, asi que el clasificador no sobrevive a destruir topologia ni asignacion de pesos.
+
+Esto sugiere que hay una senal real en el layout fijo de aristas, especialmente en que conexiones aparecen y con que signo. No deberiamos describirlo como "los pesos exactos de correlacion son perfectos"; seria mas preciso decir:
+
+```text
+El patron topologico/signado del grafo PIG distingue de forma robusta las corrupciones IOI en GPT-2.
+```
+
+### Decision para paper
+
+Recomendacion:
+
+1. Incluir `WL bootstrap linear` como baseline clasico metodologicamente cercano al grafo PIG.
+2. Incluir `fixed-layout sign linear` como baseline fuerte de layout fijo.
+3. Incluir `fixed-layout binary linear` como ablation para separar topologia de pesos.
+4. No usar el resultado `fixed-layout weighted = 1.000` de `n=20` como claim principal.
+5. No reportar RBF como resultado fuerte; queda como control negativo o se omite de la tabla principal.
+6. Reportar obligatoriamente `edge_shuffle` y `weight_shuffle` con split disjunto.
+
+La frase defendible para el paper seria:
+
+```text
+Under an example-disjoint bootstrap evaluation with 100 prompts per corruption,
+fixed-layout signed edge features achieve 0.9896 mean accuracy across seeds,
+while edge and weight shuffling reduce performance to chance.
+```
+
+### Comando ejecutado
+
+```bash
+HF_HOME=/home/ruben/PIG/.cache/huggingface \
+CUDA_VISIBLE_DEVICES=2 \
+uv run python scripts/run_paper_decision_study.py \
+  --model-name gpt2 \
+  --device cuda \
+  --seeds 7,42,123 \
+  --k-grid 5 \
+  --num-examples-grid 100 \
+  --node-types-grid res \
+  --graphs-per-slice 32 \
+  --null-repeats 10 \
+  --output-dir outputs/paper_decision/gpt2_n100_res_k5_20260430 \
+  --cache-root .cache/paper_decision/gpt2_n100_res_k5_20260430
+```
