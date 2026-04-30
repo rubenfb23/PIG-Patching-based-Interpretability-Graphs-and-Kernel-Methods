@@ -1,4 +1,4 @@
-# Informe GPT-2: WL, fixed-layout, GNN y decision para paper
+# Informe GPT-2: WL, fixed-layout, GNN, spectral, graphlets y decision para paper
 
 Fecha: 2026-04-30
 Modelo: `gpt2`
@@ -8,12 +8,14 @@ Nota sobre `n`: en este informe, `n` significa numero de prompt pairs por corrup
 
 ## 1. Resumen
 
-Se reviso la parte de representacion de grafos de la pipeline PIG. Antes se usaba principalmente `WL + SVM` sobre grafos auxiliares por ejemplo. Ahora se compararon cuatro familias:
+Se reviso la parte de representacion de grafos de la pipeline PIG. Antes se usaba principalmente `WL + SVM` sobre grafos auxiliares por ejemplo. Ahora se compararon seis familias:
 
 - `WL per-example`: baseline historico.
 - `WL bootstrap-slice`: WL sobre grafos tipo slice, mas cercano al objeto canonico PIG.
 - `Fixed-layout`: vectorizacion directa de slots `u -> v` del transformer.
 - `GNN`: message-passing pequeno sobre los mismos grafos bootstrap.
+- `Spectral shape`: autovalores/autovectores del grafo.
+- `Graphlets`: conteos de patrones pequenos de 3 nodos.
 
 Conclusion para paper:
 
@@ -22,6 +24,7 @@ Conclusion para paper:
 - La mejor variante es `fixed-layout sign linear`: `0.9896` accuracy media.
 - `edge_shuffle` y `weight_shuffle` caen a azar: `0.5000` y `0.5021`.
 - La GNN no mejora WL/fixed-layout y no conviene como resultado principal.
+- Spectral y graphlets capturan forma global/local del grafo, pero quedan cerca de azar.
 
 Recomendacion:
 
@@ -61,6 +64,10 @@ Patch effects
                                     +---------------> fixed-layout
                                     |
                                     +---------------> GNN
+                                    |
+                                    +---------------> spectral shape
+                                    |
+                                    +---------------> graphlets
                                     |
                                     +---------------> null controls
 ```
@@ -318,6 +325,173 @@ Contras:
 - Mas estocastico y menos interpretable.
 - En esta prueba no supera a fixed-layout ni a WL bootstrap.
 
+### 4.4 Spectral shape
+
+La idea es resumir la forma global del grafo usando autovalores y autovectores. Si dos grafos tienen conectividad global parecida, sus espectros suelen parecerse.
+
+Matriz de adyacencia no dirigida con pesos absolutos:
+
+```math
+A^{\mathrm{abs}}_{uv}
+=
+|w_{uv}| + |w_{vu}|
+```
+
+Grado:
+
+```math
+d_u
+=
+\sum_v A^{\mathrm{abs}}_{uv}
+```
+
+Laplaciano normalizado:
+
+```math
+L
+=
+I - D^{-1/2} A^{\mathrm{abs}} D^{-1/2}
+```
+
+Autovalores/autovectores:
+
+```math
+L q_j
+=
+\lambda_j q_j
+```
+
+Tambien se usa una matriz signada:
+
+```math
+S_{uv}
+=
+\mathrm{sign}(w_{uv}) + \mathrm{sign}(w_{vu})
+```
+
+```math
+S r_j
+=
+\mu_j r_j
+```
+
+Vector spectral usado:
+
+```math
+\phi_{\mathrm{spec}}(G)
+=
+\left[
+\lambda_{\mathrm{low}},
+\lambda_{\mathrm{high}},
+\mu_{\mathrm{low}},
+\mu_{\mathrm{high}},
+\sum_v q_{v,\mathrm{low}}^4,
+\sum_v q_{v,\mathrm{high}}^4
+\right]
+```
+
+El termino `sum_v q_{v,j}^4` mide si un autovector esta concentrado en pocos nodos o repartido por todo el grafo.
+
+Pros:
+
+- Muy compacto: aqui `96` features (`16` valores por bloque).
+- Captura forma global del grafo.
+- Es menos dependiente del nombre exacto de cada edge slot.
+
+Contras:
+
+- Pierde identidad fina de nodos `layer/token`.
+- Grafos distintos pueden tener espectros parecidos.
+- En estos datos no separa bien las clases.
+
+### 4.5 Graphlets
+
+La idea es contar patrones pequenos. Aqui usamos graphlets de 3 nodos sobre la topologia no dirigida: tripletas vacias, con una arista, con dos aristas y triangulos.
+
+Adyacencia binaria:
+
+```math
+B_{uv}
+=
+\mathbf{1}[(u,v) \in E \ \mathrm{o}\ (v,u) \in E]
+```
+
+Numero de aristas:
+
+```math
+m
+=
+\frac{1}{2}
+\sum_{u,v} B_{uv}
+```
+
+Triangulos:
+
+```math
+T
+=
+\frac{\mathrm{tr}(B^3)}{6}
+```
+
+Tripletas de dos aristas:
+
+```math
+P_2
+=
+\sum_v
+\frac{d_v(d_v-1)}{2}
+-
+3T
+```
+
+Tripletas de una arista:
+
+```math
+P_1
+=
+m(|V|-2) - 2P_2 - 3T
+```
+
+Tripletas sin aristas:
+
+```math
+P_0
+=
+\binom{|V|}{3}
+-
+P_1
+-
+P_2
+-
+T
+```
+
+Vector graphlet usado:
+
+```math
+\phi_{\mathrm{graphlet}}(G)
+=
+\left[
+P_0,P_1,P_2,T,
+\mathrm{density},
+s_{\mathrm{degree}},
+s_{\mathrm{weight}},
+s_{\mathrm{sign}}
+\right]
+```
+
+Pros:
+
+- Muy interpretable: describe motifs locales simples.
+- Barato y de baja dimension: `38` features.
+- No depende tanto de la posicion exacta de cada arista.
+
+Contras:
+
+- Pierde casi toda la identidad transformer del nodo.
+- Los grafos PIG son top-k y bastante regulares, asi que muchos conteos se parecen.
+- En estos datos no alcanza a WL ni fixed-layout.
+
 ## 5. Controles nulos
 
 Se usaron tres controles:
@@ -449,11 +623,11 @@ split disjunto por ejemplos base
 
 Resultados por seed:
 
-| Seed | WL linear | WL RBF | Weighted linear | Binary linear | Sign linear | Edge-shuffle test | Weight-shuffle test |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 7 | 0.7969 | 0.8281 | 0.9531 | 0.9844 | 1.0000 | 0.5000 | 0.5000 |
-| 42 | 0.5469 | 0.5156 | 0.6562 | 0.8281 | 0.9688 | 0.5000 | 0.5063 |
-| 123 | 0.9531 | 0.5000 | 1.0000 | 0.9844 | 1.0000 | 0.5000 | 0.5000 |
+| Seed | WL linear | Weighted linear | Binary linear | Sign linear | Spectral linear | Graphlet linear | Edge-shuffle | Weight-shuffle |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 7 | 0.7969 | 0.9531 | 0.9844 | 1.0000 | 0.5938 | 0.5469 | 0.5000 | 0.5000 |
+| 42 | 0.5469 | 0.6562 | 0.8281 | 0.9688 | 0.5469 | 0.6094 | 0.5000 | 0.5063 |
+| 123 | 0.9531 | 1.0000 | 0.9844 | 1.0000 | 0.6719 | 0.7500 | 0.5000 | 0.5000 |
 
 Medias:
 
@@ -465,6 +639,10 @@ Medias:
 | Fixed weighted RBF | 0.5000 | 0.0000 | No util |
 | Fixed binary topology linear | 0.9323 | 0.0737 | Topologia separa bien |
 | Fixed sign topology linear | 0.9896 | 0.0147 | Mejor y mas estable |
+| Spectral shape linear | 0.6042 | 0.0515 | Forma global insuficiente |
+| Spectral shape RBF | 0.5208 | 0.0748 | Cerca de azar |
+| Graphlet shape linear | 0.6354 | 0.0849 | Motifs locales insuficientes |
+| Graphlet shape RBF | 0.5104 | 0.0515 | Cerca de azar |
 | Edge-shuffle test | 0.5000 | 0.0000 | Destruir topologia lleva a azar |
 | Weight-shuffle test | 0.5021 | 0.0029 | Destruir asignacion de pesos lleva a azar |
 
@@ -476,6 +654,8 @@ WL bootstrap        ########-- 0.766
 Fixed weighted      #########- 0.870
 Fixed binary        #########- 0.932
 Fixed sign          ########## 0.990
+Spectral shape      ######---- 0.604
+Graphlet shape      ######---- 0.635
 
 Test-time controls sobre fixed weighted
 Edge shuffle        #####----- 0.500
@@ -488,6 +668,7 @@ Interpretacion:
 - La senal mas estable no es el peso continuo, sino el signo del edge slot.
 - La mascara topologica binaria tambien es muy fuerte.
 - RBF no aporta en fixed-layout.
+- Spectral y graphlets no bastan: al quitar identidad fina `layer/token/edge slot`, la senal cae mucho.
 - Los controles de test-time caen a azar, asi que la senal no sobrevive a destruir topologia o asignacion de pesos.
 
 ## 9. Pros y contras finales
@@ -500,6 +681,8 @@ Interpretacion:
 | Fixed binary | Aisla topologia, fuerte | No usa pesos | Incluir como ablation |
 | Fixed sign | Mejor accuracy y estabilidad | Depende de layout fijo | Incluir como resultado fuerte |
 | GNN | Flexible, aprende features | No mejora, menos interpretable | No incluir como main |
+| Spectral shape | Compacto, captura forma global | Pierde identidad de nodos, accuracy baja | No incluir como main |
+| Graphlets | Motifs locales interpretables | Demasiado agregado para PIG | No incluir como main |
 
 ## 10. Recomendacion para paper
 
@@ -511,6 +694,8 @@ Tabla principal sugerida:
 | Fixed weighted linear | 0.8698 | Edge weights continuos |
 | Fixed binary topology linear | 0.9323 | Ablation topologica |
 | Fixed sign topology linear | 0.9896 | Mejor resultado |
+| Spectral shape linear | 0.6042 | Control de forma global |
+| Graphlet shape linear | 0.6354 | Control de motifs locales |
 | Edge-shuffle test | 0.5000 | Control negativo |
 | Weight-shuffle test | 0.5021 | Control negativo |
 
@@ -533,6 +718,7 @@ Por que no:
 - Ese `1.000` venia de `n=20` y bootstrap-CV.
 - La version `n=100` muestra que topologia/signo son mas estables que pesos continuos.
 - La conclusion correcta es sobre patron topologico/signado del grafo, no sobre perfeccion de pesos.
+- Spectral y graphlets ayudan como controles negativos: muestran que no basta con forma global/local agregada del grafo.
 
 ## 11. Comandos clave
 
@@ -570,5 +756,24 @@ uv run python scripts/run_paper_decision_study.py \
   --graphs-per-slice 32 \
   --null-repeats 10 \
   --output-dir outputs/paper_decision/gpt2_n100_res_k5_20260430 \
+  --cache-root .cache/paper_decision/gpt2_n100_res_k5_20260430
+```
+
+Spectral y graphlets `n=100`:
+
+```bash
+HF_HOME=/home/ruben/PIG/.cache/huggingface \
+CUDA_VISIBLE_DEVICES=2 \
+uv run python scripts/run_paper_decision_study.py \
+  --model-name gpt2 \
+  --device cuda \
+  --seeds 7,42,123 \
+  --k-grid 5 \
+  --num-examples-grid 100 \
+  --node-types-grid res \
+  --graphs-per-slice 32 \
+  --null-repeats 0 \
+  --spectral-values 16 \
+  --output-dir outputs/paper_decision/gpt2_n100_res_k5_spectral_graphlets_20260430 \
   --cache-root .cache/paper_decision/gpt2_n100_res_k5_20260430
 ```
