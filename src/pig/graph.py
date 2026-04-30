@@ -15,6 +15,7 @@ Key features:
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Optional
@@ -64,15 +65,12 @@ class Node:
         """Convert to linear index."""
         if component_axis is None:
             if self.node_type != "res" or self.head is not None:
-                raise ValueError(
-                    "component_axis required for non-residual nodes"
-                )
+                raise ValueError("component_axis required for non-residual nodes")
             return self.layer * num_tokens + self.token
         component_idx = self._component_index(component_axis)
-        return (
-            (self.layer * num_tokens + self.token) * len(component_axis)
-            + component_idx
-        )
+        return (self.layer * num_tokens + self.token) * len(
+            component_axis
+        ) + component_idx
 
     def _component_index(self, component_axis: list[ComponentSpec]) -> int:
         for idx, comp in enumerate(component_axis):
@@ -178,7 +176,9 @@ class PatchInfluenceGraph:
         stats = {
             "num_nodes": self.num_nodes,
             "num_edges": self.num_edges,
-            "density": self.num_edges / (self.num_nodes ** 2) if self.num_nodes > 0 else 0,
+            "density": (
+                self.num_edges / (self.num_nodes**2) if self.num_nodes > 0 else 0
+            ),
             "mean_in_degree": float(np.mean(in_deg)),
             "mean_out_degree": float(np.mean(out_deg)),
             "max_in_degree": int(np.max(in_deg)) if len(in_deg) > 0 else 0,
@@ -319,7 +319,7 @@ class GraphBuilder:
             if self.k >= n:
                 top_indices = np.arange(n)
             else:
-                top_indices = np.argsort(np.abs(row))[-self.k:]
+                top_indices = np.argsort(np.abs(row))[-self.k :]
 
             sparse_weights[i, top_indices] = row[top_indices]
 
@@ -343,13 +343,49 @@ class GraphBuilder:
         if not tensors:
             raise ValueError(f"No tensors found for slice {slice_label}")
 
-        # Get common dimensions (uses minimum token count across examples)
-        num_layers, num_tokens, _ = dataset.get_common_dimensions(slice_label)
-        component_axis = dataset.get_component_axis()
+        return self.build_from_tensors(tensors, slice_label)
 
-        # Create effect matrix [num_examples, num_nodes]
-        # This truncates to num_tokens to ensure consistent dimensions
-        effect_matrix = dataset.get_effect_matrix(slice_label, max_tokens=num_tokens)
+    def build_from_tensors(
+        self,
+        tensors: list,
+        slice_label: SliceLabel,
+        *,
+        max_tokens: Optional[int] = None,
+        graph_role: str = "canonical_slice_graph",
+        construction_mode: str = "slice_correlation",
+        metadata: Optional[dict] = None,
+    ) -> PatchInfluenceGraph:
+        """Build a slice-correlation graph from an explicit tensor subset.
+
+        This is the same construction as ``build_from_slice()``, but it accepts
+        a caller-selected tensor subset. Publication baselines use it for
+        bootstrap slice graphs while keeping the canonical graph path unchanged.
+        """
+        if not tensors:
+            raise ValueError(f"No tensors provided for slice {slice_label}")
+
+        component_axis = tensors[0].component_axis
+        for tensor in tensors:
+            if tensor.component_axis != component_axis:
+                raise ValueError("Inconsistent component_axis in tensor subset")
+            if tensor.prompt_pair.slice_label != slice_label:
+                raise ValueError("Tensor subset contains a different slice label")
+
+        num_layers = tensors[0].num_layers
+        if any(tensor.num_layers != num_layers for tensor in tensors):
+            raise ValueError("Inconsistent num_layers in tensor subset")
+
+        common_tokens = min(tensor.num_tokens for tensor in tensors)
+        num_tokens = (
+            common_tokens if max_tokens is None else min(max_tokens, common_tokens)
+        )
+        if num_tokens <= 0:
+            raise ValueError("max_tokens must leave at least one token")
+
+        effect_matrix = np.stack(
+            [tensor.effects[:, :num_tokens, :].reshape(-1) for tensor in tensors],
+            axis=0,
+        )
 
         # Compute correlation matrix
         corr_matrix = self._compute_correlation_matrix(effect_matrix)
@@ -372,20 +408,24 @@ class GraphBuilder:
                 if abs(weight) > self.min_weight and i != j:
                     edges.append(Edge(src=i, dst=j, weight=float(weight)))
 
+        graph_metadata = {
+            "k": self.k,
+            "enforce_direction": self.enforce_direction,
+            "num_examples": len(tensors),
+            "graph_builder": self.__class__.__name__,
+            "graph_role": graph_role,
+            "construction_mode": construction_mode,
+        }
+        if metadata:
+            graph_metadata.update(metadata)
+
         return PatchInfluenceGraph(
             nodes=nodes,
             edges=edges,
             slice_label=slice_label,
             num_layers=num_layers,
             num_tokens=num_tokens,
-            metadata={
-                "k": self.k,
-                "enforce_direction": self.enforce_direction,
-                "num_examples": len(tensors),
-                "graph_builder": self.__class__.__name__,
-                "graph_role": "canonical_slice_graph",
-                "construction_mode": "slice_correlation",
-            },
+            metadata=graph_metadata,
         )
 
     def build_all(
@@ -429,9 +469,7 @@ class GraphBuilder:
             component_axis = tensor.component_axis
 
             # Create nodes
-            nodes = self._create_nodes(
-                num_layers, num_tokens, component_axis
-            )
+            nodes = self._create_nodes(num_layers, num_tokens, component_axis)
 
             # Build edge weights from effect magnitudes
             # Edges connect positions with similar effect magnitudes
@@ -501,9 +539,10 @@ def create_graph_builder(
     to `"correlation_topk"`.
     """
     resolved_name = (
-        builder_name
-        or os.getenv(GRAPH_BUILDER_ENV_VAR, DEFAULT_GRAPH_BUILDER)
-    ).strip().lower()
+        (builder_name or os.getenv(GRAPH_BUILDER_ENV_VAR, DEFAULT_GRAPH_BUILDER))
+        .strip()
+        .lower()
+    )
     if not resolved_name:
         resolved_name = DEFAULT_GRAPH_BUILDER
 
@@ -540,6 +579,75 @@ def build_graphs(
         enforce_direction=enforce_direction,
     )
     return builder.build_all(dataset)
+
+
+def build_bootstrap_slice_graphs(
+    dataset: PatchEffectDataset,
+    builder: GraphBuilder,
+    *,
+    graphs_per_slice: int = 12,
+    sample_fraction: float = 0.75,
+    min_examples: int = 3,
+    seed: int = 42,
+    replace: bool = True,
+) -> list[tuple[PatchInfluenceGraph, SliceLabel]]:
+    """Build auxiliary bootstrap graphs that preserve slice-level semantics.
+
+    The canonical PIG graph summarizes a slice across examples. This helper
+    creates multiple slice-like graphs by resampling examples within each slice,
+    giving classifiers more samples without falling back to per-example
+    similarity graphs.
+    """
+    if graphs_per_slice < 0:
+        raise ValueError("graphs_per_slice must be non-negative")
+    if sample_fraction <= 0:
+        raise ValueError("sample_fraction must be positive")
+    if min_examples <= 0:
+        raise ValueError("min_examples must be positive")
+    if len(dataset) == 0 or graphs_per_slice == 0:
+        return []
+
+    rng = np.random.default_rng(seed)
+    global_max_tokens = min(tensor.num_tokens for tensor in dataset)
+    graphs: list[tuple[PatchInfluenceGraph, SliceLabel]] = []
+
+    for slice_label in sorted(dataset.get_slices(), key=str):
+        tensors = dataset.get_by_slice(slice_label)
+        if not tensors:
+            continue
+
+        requested_size = max(
+            min_examples,
+            int(math.ceil(len(tensors) * sample_fraction)),
+        )
+        if replace:
+            sample_size = requested_size
+        else:
+            sample_size = min(requested_size, len(tensors))
+
+        for bootstrap_index in range(graphs_per_slice):
+            indices = rng.choice(
+                len(tensors),
+                size=sample_size,
+                replace=replace or sample_size > len(tensors),
+            )
+            sampled_tensors = [tensors[int(index)] for index in indices]
+            graph = builder.build_from_tensors(
+                sampled_tensors,
+                slice_label,
+                max_tokens=global_max_tokens,
+                graph_role="auxiliary_bootstrap_slice_baseline",
+                construction_mode="bootstrap_slice_correlation",
+                metadata={
+                    "bootstrap_index": bootstrap_index,
+                    "bootstrap_sample_size": sample_size,
+                    "bootstrap_sample_fraction": float(sample_fraction),
+                    "bootstrap_replace": bool(replace),
+                },
+            )
+            graphs.append((graph, slice_label))
+
+    return graphs
 
 
 def build_graphs_for_builders(

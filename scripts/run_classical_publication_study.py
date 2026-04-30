@@ -18,7 +18,9 @@ import csv
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Sequence
+
+import numpy as np
 
 from pig.causal import (
     CausalEvalConfig,
@@ -28,8 +30,12 @@ from pig.causal import (
     split_discovery_evaluation_tensors,
 )
 from pig.embeddings import compute_wl_features_from_list
-from pig.graph import create_graph_builder
-from pig.kernels import train_classical_baseline
+from pig.graph import build_bootstrap_slice_graphs, create_graph_builder
+from pig.graph_features import (
+    apply_null_control_to_graphs,
+    compute_fixed_layout_features_from_list,
+)
+from pig.kernels import ClassicalKernelClassifier
 from pig.model import create_model
 from pig.patching import compute_patch_effects
 from pig.prompts import create_ioi_dataset
@@ -81,16 +87,133 @@ def _slice_graph_stats(graphs: dict) -> dict[str, dict]:
     return stats
 
 
-def _classical_metrics(feature_matrix, seed: int) -> dict[str, dict]:
+def _matrix_classical_metrics(X, y, seed: int) -> dict[str, dict]:
     metrics = {}
     for kernel in ("linear", "rbf"):
-        _, cv_results = train_classical_baseline(
-            feature_matrix,
+        classifier = ClassicalKernelClassifier(
             kernel=kernel,
             random_state=seed,
         )
+        cv_results = classifier.cross_validate(X, y)
         metrics[kernel] = cv_results
     return metrics
+
+
+def _permuted_labels(labels, rng) -> list:
+    order = rng.permutation(len(labels))
+    return [labels[int(index)] for index in order]
+
+
+def _aggregate_null_metrics(observed: dict, null_runs: list[dict]) -> dict:
+    if not null_runs:
+        return {}
+
+    summary = {}
+    for kernel in ("linear", "rbf"):
+        values = [
+            float(run[kernel]["accuracy_mean"])
+            for run in null_runs
+            if kernel in run and "accuracy_mean" in run[kernel]
+        ]
+        if not values:
+            continue
+        null_mean = float(sum(values) / len(values))
+        null_std = float(np.std(values))
+        summary[kernel] = {
+            "accuracy_mean": null_mean,
+            "accuracy_std": null_std,
+            "observed_minus_null_mean": float(
+                observed[kernel]["accuracy_mean"] - null_mean
+            ),
+            "repeats": len(values),
+            "accuracy_values": values,
+        }
+    return summary
+
+
+def _evaluate_feature_family(
+    graphs_with_labels,
+    *,
+    feature_builder,
+    seed: int,
+    null_repeats: int,
+) -> dict:
+    if not graphs_with_labels:
+        return {"error": "No graphs available for feature family"}
+
+    feature_matrix = feature_builder(graphs_with_labels)
+    X = feature_matrix.to_matrix()
+    y = feature_matrix.slice_labels
+    observed = _matrix_classical_metrics(X, y, seed=seed)
+
+    result = {
+        "feature_shape": {
+            "num_graphs": int(feature_matrix.num_graphs),
+            "num_features": int(feature_matrix.num_features),
+        },
+        "observed": observed,
+        "null_controls": {},
+    }
+    if null_repeats <= 0:
+        return result
+
+    rng = np.random.default_rng(seed)
+    label_runs = []
+    for repeat in range(null_repeats):
+        label_runs.append(
+            _matrix_classical_metrics(
+                X,
+                _permuted_labels(y, rng),
+                seed=seed + 101 + repeat,
+            )
+        )
+    result["null_controls"]["label_permutation"] = _aggregate_null_metrics(
+        observed,
+        label_runs,
+    )
+
+    for control in ("edge_shuffle", "weight_shuffle"):
+        graph_runs = []
+        for repeat in range(null_repeats):
+            null_graphs = apply_null_control_to_graphs(
+                graphs_with_labels,
+                control,
+                seed=seed + 1_000 + repeat,
+            )
+            null_features = feature_builder(null_graphs)
+            graph_runs.append(
+                _matrix_classical_metrics(
+                    null_features.to_matrix(),
+                    null_features.slice_labels,
+                    seed=seed + 2_000 + repeat,
+                )
+            )
+        result["null_controls"][control] = _aggregate_null_metrics(
+            observed,
+            graph_runs,
+        )
+
+    return result
+
+
+def _wl_feature_builder(depth: int):
+    def build(graphs_with_labels):
+        return compute_wl_features_from_list(graphs_with_labels, depth=depth)
+
+    return build
+
+
+def _fixed_layout_feature_builder(graphs_with_labels):
+    return compute_fixed_layout_features_from_list(graphs_with_labels)
+
+
+def _nested_metric(data: dict, path: Sequence[str], default=0.0):
+    current = data
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            return default
+        current = current[key]
+    return current
 
 
 def _causal_metrics(
@@ -113,7 +236,9 @@ def _causal_metrics(
         seed=seed,
     )
     if require_clean_better:
-        eligible = [tensor for tensor in dataset if tensor.clean_score > tensor.base_score]
+        eligible = [
+            tensor for tensor in dataset if tensor.clean_score > tensor.base_score
+        ]
         filter_rule = "clean_score > base_score"
     else:
         eligible = list(dataset)
@@ -178,7 +303,9 @@ def _causal_metrics(
         "num_candidates": len(candidates),
         "num_edges_evaluated": num_evaluated,
         "i_significant_fdr_bh": i_fdr_significant,
-        "i_significant_bonferroni": int(multiple_testing["I"]["significant_bonferroni"]),
+        "i_significant_bonferroni": int(
+            multiple_testing["I"]["significant_bonferroni"]
+        ),
         "i_survival_rate_fdr_bh": survival_rate,
         "multiple_testing": multiple_testing,
     }
@@ -196,6 +323,19 @@ def _write_summary_csv(path: Path, rows: Sequence[dict]) -> None:
         "linear_accuracy_std",
         "rbf_accuracy_mean",
         "rbf_accuracy_std",
+        "bootstrap_wl_linear_accuracy_mean",
+        "bootstrap_wl_rbf_accuracy_mean",
+        "fixed_layout_linear_accuracy_mean",
+        "fixed_layout_rbf_accuracy_mean",
+        "wl_per_example_linear_label_null_delta",
+        "wl_bootstrap_linear_label_null_delta",
+        "fixed_layout_linear_label_null_delta",
+        "wl_per_example_linear_edge_null_delta",
+        "wl_bootstrap_linear_edge_null_delta",
+        "fixed_layout_linear_edge_null_delta",
+        "wl_per_example_linear_weight_null_delta",
+        "wl_bootstrap_linear_weight_null_delta",
+        "fixed_layout_linear_weight_null_delta",
         "causal_i_survival_rate_fdr_bh",
         "causal_i_significant_fdr_bh",
         "causal_num_edges_evaluated",
@@ -227,6 +367,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--graph-builder", default="correlation_topk")
     parser.add_argument("--wl-depth", type=int, default=3)
+    parser.add_argument("--bootstrap-graphs-per-slice", type=int, default=12)
+    parser.add_argument("--bootstrap-sample-fraction", type=float, default=0.75)
+    parser.add_argument("--bootstrap-min-examples", type=int, default=3)
+    parser.add_argument(
+        "--null-repeats",
+        type=int,
+        default=5,
+        help="Number of label/topology/weight null-control repeats per baseline.",
+    )
     parser.add_argument("--causal-num-edges", type=int, default=5)
     parser.add_argument(
         "--causal-total-examples",
@@ -334,12 +483,37 @@ def main() -> None:
                     )
                     slice_graphs = builder.build_all(dataset)
                     example_graphs = builder.build_per_example(dataset)
-                    feature_matrix = compute_wl_features_from_list(
-                        example_graphs,
-                        depth=args.wl_depth,
+                    bootstrap_graphs = build_bootstrap_slice_graphs(
+                        dataset,
+                        builder,
+                        graphs_per_slice=args.bootstrap_graphs_per_slice,
+                        sample_fraction=args.bootstrap_sample_fraction,
+                        min_examples=args.bootstrap_min_examples,
+                        seed=seed,
                     )
 
-                    classical = _classical_metrics(feature_matrix, seed=seed)
+                    wl_builder = _wl_feature_builder(args.wl_depth)
+                    auxiliary_baselines = {
+                        "wl_per_example": _evaluate_feature_family(
+                            example_graphs,
+                            feature_builder=wl_builder,
+                            seed=seed,
+                            null_repeats=args.null_repeats,
+                        ),
+                        "wl_bootstrap_slice": _evaluate_feature_family(
+                            bootstrap_graphs,
+                            feature_builder=wl_builder,
+                            seed=seed,
+                            null_repeats=args.null_repeats,
+                        ),
+                        "fixed_layout_bootstrap_slice": _evaluate_feature_family(
+                            bootstrap_graphs,
+                            feature_builder=_fixed_layout_feature_builder,
+                            seed=seed,
+                            null_repeats=args.null_repeats,
+                        ),
+                    }
+                    classical = auxiliary_baselines["wl_per_example"]["observed"]
                     causal = _causal_metrics(
                         model=model,
                         dataset=dataset,
@@ -363,11 +537,14 @@ def main() -> None:
                         "corruptions": corruptions,
                         "slice_graphs": _slice_graph_stats(slice_graphs),
                         "classical_baselines": classical,
+                        "auxiliary_baselines": auxiliary_baselines,
                         "causal_eval": causal,
                     }
                     run_reports.append(report)
 
-                    with (runs_dir / f"{run_key}.json").open("w", encoding="utf-8") as handle:
+                    with (runs_dir / f"{run_key}.json").open(
+                        "w", encoding="utf-8"
+                    ) as handle:
                         json.dump(report, handle, indent=2, sort_keys=True)
 
                     summary_rows.append(
@@ -382,10 +559,138 @@ def main() -> None:
                                 if args.causal_require_clean_better
                                 else "all_examples"
                             ),
-                            "linear_accuracy_mean": classical["linear"]["accuracy_mean"],
+                            "linear_accuracy_mean": classical["linear"][
+                                "accuracy_mean"
+                            ],
                             "linear_accuracy_std": classical["linear"]["accuracy_std"],
                             "rbf_accuracy_mean": classical["rbf"]["accuracy_mean"],
                             "rbf_accuracy_std": classical["rbf"]["accuracy_std"],
+                            "bootstrap_wl_linear_accuracy_mean": _nested_metric(
+                                auxiliary_baselines,
+                                [
+                                    "wl_bootstrap_slice",
+                                    "observed",
+                                    "linear",
+                                    "accuracy_mean",
+                                ],
+                            ),
+                            "bootstrap_wl_rbf_accuracy_mean": _nested_metric(
+                                auxiliary_baselines,
+                                [
+                                    "wl_bootstrap_slice",
+                                    "observed",
+                                    "rbf",
+                                    "accuracy_mean",
+                                ],
+                            ),
+                            "fixed_layout_linear_accuracy_mean": _nested_metric(
+                                auxiliary_baselines,
+                                [
+                                    "fixed_layout_bootstrap_slice",
+                                    "observed",
+                                    "linear",
+                                    "accuracy_mean",
+                                ],
+                            ),
+                            "fixed_layout_rbf_accuracy_mean": _nested_metric(
+                                auxiliary_baselines,
+                                [
+                                    "fixed_layout_bootstrap_slice",
+                                    "observed",
+                                    "rbf",
+                                    "accuracy_mean",
+                                ],
+                            ),
+                            "wl_per_example_linear_label_null_delta": _nested_metric(
+                                auxiliary_baselines,
+                                [
+                                    "wl_per_example",
+                                    "null_controls",
+                                    "label_permutation",
+                                    "linear",
+                                    "observed_minus_null_mean",
+                                ],
+                            ),
+                            "wl_bootstrap_linear_label_null_delta": _nested_metric(
+                                auxiliary_baselines,
+                                [
+                                    "wl_bootstrap_slice",
+                                    "null_controls",
+                                    "label_permutation",
+                                    "linear",
+                                    "observed_minus_null_mean",
+                                ],
+                            ),
+                            "fixed_layout_linear_label_null_delta": _nested_metric(
+                                auxiliary_baselines,
+                                [
+                                    "fixed_layout_bootstrap_slice",
+                                    "null_controls",
+                                    "label_permutation",
+                                    "linear",
+                                    "observed_minus_null_mean",
+                                ],
+                            ),
+                            "wl_per_example_linear_edge_null_delta": _nested_metric(
+                                auxiliary_baselines,
+                                [
+                                    "wl_per_example",
+                                    "null_controls",
+                                    "edge_shuffle",
+                                    "linear",
+                                    "observed_minus_null_mean",
+                                ],
+                            ),
+                            "wl_bootstrap_linear_edge_null_delta": _nested_metric(
+                                auxiliary_baselines,
+                                [
+                                    "wl_bootstrap_slice",
+                                    "null_controls",
+                                    "edge_shuffle",
+                                    "linear",
+                                    "observed_minus_null_mean",
+                                ],
+                            ),
+                            "fixed_layout_linear_edge_null_delta": _nested_metric(
+                                auxiliary_baselines,
+                                [
+                                    "fixed_layout_bootstrap_slice",
+                                    "null_controls",
+                                    "edge_shuffle",
+                                    "linear",
+                                    "observed_minus_null_mean",
+                                ],
+                            ),
+                            "wl_per_example_linear_weight_null_delta": _nested_metric(
+                                auxiliary_baselines,
+                                [
+                                    "wl_per_example",
+                                    "null_controls",
+                                    "weight_shuffle",
+                                    "linear",
+                                    "observed_minus_null_mean",
+                                ],
+                            ),
+                            "wl_bootstrap_linear_weight_null_delta": _nested_metric(
+                                auxiliary_baselines,
+                                [
+                                    "wl_bootstrap_slice",
+                                    "null_controls",
+                                    "weight_shuffle",
+                                    "linear",
+                                    "observed_minus_null_mean",
+                                ],
+                            ),
+                            "fixed_layout_linear_weight_null_delta": _nested_metric(
+                                auxiliary_baselines,
+                                [
+                                    "fixed_layout_bootstrap_slice",
+                                    "null_controls",
+                                    "weight_shuffle",
+                                    "linear",
+                                    "observed_minus_null_mean",
+                                ],
+                            ),
                             "causal_i_survival_rate_fdr_bh": causal.get(
                                 "i_survival_rate_fdr_bh", 0.0
                             ),
