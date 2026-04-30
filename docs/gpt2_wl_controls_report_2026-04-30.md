@@ -625,3 +625,263 @@ uv run python scripts/run_classical_publication_study.py \
 ```
 
 La GPU ayuda, pero no tanto como deberia porque la pipeline actual hace muchos forwards pequenos con hooks y poca agregacion/batching. El siguiente cuello tecnico real es batchear patching/causal eval.
+
+## Anexo: prueba real con GNN
+
+Despues de la recomendacion anterior, se implemento una GNN pequena para probar empiricamente si aprende una representacion mejor que WL/fixed-layout sobre los mismos grafos bootstrap.
+
+No se ha cambiado lo anterior del informe: esta seccion anade el experimento nuevo.
+
+### Antes teniamos esto
+
+La ruta nueva mas comparable era:
+
+```text
+Patch effects
+    |
+    v
+Bootstrap slice graphs
+    |
+    +--> WL + SVM
+    |
+    +--> fixed-layout + SVM
+```
+
+La GNN prueba esta variante:
+
+```text
+Patch effects
+    |
+    v
+Bootstrap slice graphs
+    |
+    v
+Message-passing GNN
+    |
+    v
+MLP classifier
+```
+
+La diferencia conceptual es que WL define a mano como convertir un grafo en histogramas de patrones, mientras que la GNN aprende una funcion sobre nodos y aristas.
+
+### Que se ha implementado
+
+Codigo nuevo:
+
+- `src/pig/gnn.py`: GNN PyTorch ligera, sin depender de PyTorch Geometric ni librerias externas de grafos.
+- `scripts/run_gnn_representation_study.py`: runner experimental para evaluar la GNN sobre los mismos grafos bootstrap y con los mismos null controls.
+- `tests/test_gnn.py`: tests unitarios de la API publica y validacion de errores.
+
+Configuracion usada en GPT-2:
+
+- Modelo base: `gpt2`.
+- Nodos: `res`.
+- `k=5`.
+- `num_examples_per_corruption=20`.
+- Seeds: `7, 42, 123`.
+- Bootstrap graphs por slice: `12`.
+- Clasificacion: stratified 5-fold CV.
+- GNN: `hidden_dim=32`, `num_layers=2`, `dropout=0.1`, `lr=1e-2`, `weight_decay=1e-3`, `epochs=150`.
+- Null controls: `label_permutation`, `edge_shuffle`, `weight_shuffle`, con `5` repeticiones.
+
+### Formula de la GNN
+
+Cada nodo `v` se representa con atributos simples del layout fijo:
+
+```math
+x_v
+=
+\left[
+\frac{\mathrm{layer}(v)}{L-1},
+\frac{\mathrm{token}(v)}{T-1},
+\mathrm{head}(v),
+1,
+\mathrm{onehot}(\mathrm{type}(v))
+\right]
+```
+
+Inicializacion:
+
+```math
+h_v^{(0)} = x_v
+```
+
+La matriz de adyacencia dirigida se guarda como mensajes entrantes. Si existe una arista `u -> v` con peso `w_{uv}`, se normaliza por la suma de magnitudes que llegan a `v`:
+
+```math
+\widetilde{A}_{v,u}
+=
+\frac{w_{uv}}
+{\max\left(1, \sum_q |w_{qv}|\right)}
+```
+
+Mensaje recibido por `v` en la capa `t`:
+
+```math
+m_v^{(t)}
+=
+\sum_u
+\widetilde{A}_{v,u}
+h_u^{(t)}
+```
+
+Actualizacion del nodo:
+
+```math
+h_v^{(t+1)}
+=
+\mathrm{ReLU}
+\left(
+W_{\mathrm{self}}^{(t)} h_v^{(t)}
++
+W_{\mathrm{msg}}^{(t)} m_v^{(t)}
++
+b^{(t)}
+\right)
+```
+
+Pooling de grafo:
+
+```math
+g(G)
+=
+\left[
+\frac{1}{|V|}\sum_{v \in V} h_v^{(T)}
+;
+\max_{v \in V} h_v^{(T)}
+\right]
+```
+
+Clasificador final:
+
+```math
+p(y \mid G)
+=
+\mathrm{softmax}
+\left(
+W_2
+\mathrm{ReLU}
+\left(
+W_1 g(G) + b_1
+\right)
++
+b_2
+\right)
+```
+
+Intuicion:
+
+- `m_v` mezcla informacion de los nodos que apuntan a `v`.
+- Los pesos PIG modulan cuanto aporta cada vecino.
+- El pooling convierte todos los nodos en un unico vector de grafo.
+- La MLP final aprende a separar `name_swap` vs `abba`.
+
+### Que aporta frente a WL
+
+WL:
+
+```text
+estructura local -> etiquetas discretas -> histogramas -> SVM
+```
+
+GNN:
+
+```text
+atributos + pesos continuos -> mensajes aprendidos -> embedding aprendido -> MLP
+```
+
+Ventajas teoricas de la GNN:
+
+- Puede usar pesos continuos sin discretizarlos.
+- Puede aprender que capas/tokens importan mas.
+- Puede combinar topologia y atributos de nodo.
+- Puede capturar patrones que una vectorizacion manual no haya previsto.
+
+Contras practicos:
+
+- Hay muy pocos grafos: `2` slices por seed y `12` bootstraps por slice.
+- Los grafos bootstrap no son muestras totalmente independientes.
+- El entrenamiento es estocastico y tiene mas hiperparametros.
+- Es menos interpretable que WL o fixed-layout.
+- En datasets pequenos puede aprender artefactos de bootstrap en vez de estructura causal.
+
+### Resultados GPT-2
+
+Resultados por seed:
+
+| Seed | GNN accuracy | CV std | Label delta | Edge delta | Weight delta |
+|---:|---:|---:|---:|---:|---:|
+| 7 | 0.6500 | 0.2793 | 0.1800 | 0.1220 | 0.0460 |
+| 42 | 0.9100 | 0.1114 | 0.3760 | 0.1240 | 0.1740 |
+| 123 | 0.7900 | 0.1281 | 0.2200 | 0.1280 | 0.0820 |
+
+Media sobre seeds:
+
+| Representacion | Accuracy | Label delta | Edge delta | Weight delta |
+|---|---:|---:|---:|---:|
+| GNN bootstrap-slice | 0.7833 | 0.2587 | 0.1247 | 0.1007 |
+| WL bootstrap-slice | 0.8000 | 0.3913 | 0.3767 | 0.3667 |
+| Fixed-layout bootstrap | 1.0000 | 0.5240 | 0.5133 | 0.0653 |
+
+Visualmente:
+
+```text
+Accuracy linear / GNN
+GNN bootstrap       ########-- 0.783
+WL bootstrap        ########-- 0.800
+Fixed-layout        ########## 1.000
+
+Robustez vs weight shuffle
+GNN bootstrap       #--------- 0.101
+WL bootstrap        ####------ 0.367
+Fixed-layout        #--------- 0.065
+
+Robustez vs edge shuffle
+GNN bootstrap       #--------- 0.125
+WL bootstrap        ####------ 0.377
+Fixed-layout        #####----- 0.513
+```
+
+### Lectura
+
+La GNN si aprende senal por encima de controles nulos, especialmente en el seed `42`, pero no mejora el resultado principal:
+
+- Peor que `WL bootstrap-slice` en accuracy media: `0.7833` vs `0.8000`.
+- Mucho peor que `fixed-layout bootstrap`: `0.7833` vs `1.0000`.
+- Deltas contra `edge_shuffle` y `weight_shuffle` bastante mas bajos que WL bootstrap.
+- Variabilidad por seed alta: `0.6500` a `0.9100`.
+
+Esto indica que la GNN no esta explotando de forma estable la topologia/los pesos mejor que WL. Probablemente el dataset es demasiado pequeno para que el aprendizaje de parametros compense.
+
+### Conclusion actualizada sobre GNN
+
+La prueba real confirma la recomendacion original: no merece la pena sustituir WL por una GNN en esta fase.
+
+La GNN queda como baseline experimental util, pero no como mejora principal. Para esta pipeline, la ruta mas solida sigue siendo:
+
+```text
+WL bootstrap-slice como baseline WL metodologicamente correcto
+fixed-layout bootstrap como baseline clasico fuerte
+null controls obligatorios para interpretar ambos
+```
+
+Si se quiere volver a intentar GNN mas adelante, haria falta antes aumentar el numero de grafos independientes o cambiar el problema a una evaluacion con mas slices/modelos/checkpoints. Con solo dos corrupciones y bootstraps dependientes, el riesgo de sobreajuste sigue siendo demasiado alto.
+
+### Comando ejecutado
+
+```bash
+HF_HOME=/home/ruben/PIG/.cache/huggingface \
+CUDA_VISIBLE_DEVICES=2 \
+uv run python scripts/run_gnn_representation_study.py \
+  --model-name gpt2 \
+  --device cuda \
+  --gnn-device cuda \
+  --seeds 7,42,123 \
+  --k-grid 5 \
+  --num-examples-grid 20 \
+  --node-types-grid res \
+  --output-dir outputs/gnn_representation/gpt2_gnn_controls_20260430_res_k5_n20 \
+  --cache-root .cache/classical_publication/gpt2_wl_controls_20260430_res_k5_n20 \
+  --gnn-epochs 150 \
+  --null-repeats 5
+```
