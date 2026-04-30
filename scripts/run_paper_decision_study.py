@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.svm import SVC
 
 from pig.embeddings import WLEncoder
+from pig.gnn import GNNTrainingConfig, fit_gnn_encoder_svm
 from pig.graph import (
     GraphBuilder,
     Node,
@@ -219,6 +221,117 @@ def _fixed_layout_matrix(
     return MatrixBundle(X=matrix, y=labels, feature_names=feature_names)
 
 
+def _stable_hash_index(parts: Sequence[object], dim: int) -> int:
+    if dim <= 0:
+        raise ValueError("Hash dimension must be positive")
+    payload = "|".join(str(part) for part in parts).encode("utf-8")
+    digest = hashlib.blake2b(payload, digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="little", signed=False) % dim
+
+
+def _hashed_fixed_layout_matrix(
+    graphs_with_labels: list[tuple[PatchInfluenceGraph, SliceLabel]],
+    *,
+    dim: int,
+    mode: str = "sign",
+) -> MatrixBundle:
+    labels = [label for _, label in graphs_with_labels]
+    matrix = np.zeros((len(graphs_with_labels), dim), dtype=np.float32)
+
+    for row_idx, (graph, _) in enumerate(graphs_with_labels):
+        for edge in graph.edges:
+            src = graph.nodes[edge.src]
+            dst = graph.nodes[edge.dst]
+            col_idx = _stable_hash_index((_edge_key(src, dst), mode), dim)
+            if mode == "sign":
+                value = np.sign(edge.weight)
+            elif mode == "weighted":
+                value = edge.weight
+            elif mode == "binary":
+                value = 1.0
+            else:
+                raise ValueError(f"Unknown hashed fixed-layout mode: {mode}")
+            matrix[row_idx, col_idx] += np.float32(value)
+
+    feature_names = [f"hashed_{mode}_{idx}" for idx in range(dim)]
+    return MatrixBundle(X=matrix, y=labels, feature_names=feature_names)
+
+
+def _signed_bucket(value: int, *, prefix: str) -> str:
+    magnitude = abs(int(value))
+    if magnitude == 0:
+        bucket = "0"
+    elif magnitude <= 1:
+        bucket = "1"
+    elif magnitude <= 2:
+        bucket = "2"
+    elif magnitude <= 4:
+        bucket = "3_4"
+    elif magnitude <= 8:
+        bucket = "5_8"
+    else:
+        bucket = "gt8"
+    sign = "neg" if value < 0 else "pos"
+    if magnitude == 0:
+        sign = "zero"
+    return f"{prefix}_{sign}_{bucket}"
+
+
+def _coarse_edge_key(graph: PatchInfluenceGraph, edge) -> str:
+    src = graph.nodes[edge.src]
+    dst = graph.nodes[edge.dst]
+    sign = "pos" if edge.weight > 0 else "neg" if edge.weight < 0 else "zero"
+    layer_delta = _signed_bucket(dst.layer - src.layer, prefix="dl")
+    token_delta = _signed_bucket(dst.token - src.token, prefix="dt")
+    return "|".join(
+        [
+            src.node_type,
+            dst.node_type,
+            layer_delta,
+            token_delta,
+            sign,
+        ]
+    )
+
+
+def _coarse_fixed_vocabulary(
+    graphs_with_labels: list[tuple[PatchInfluenceGraph, SliceLabel]],
+) -> list[str]:
+    features = set()
+    for graph, _ in graphs_with_labels:
+        for edge in graph.edges:
+            features.add(_coarse_edge_key(graph, edge))
+    return sorted(features)
+
+
+def _coarse_fixed_layout_matrix(
+    graphs_with_labels: list[tuple[PatchInfluenceGraph, SliceLabel]],
+    *,
+    feature_names: list[str] | None = None,
+    mode: str = "count",
+) -> MatrixBundle:
+    labels = [label for _, label in graphs_with_labels]
+    if feature_names is None:
+        feature_names = _coarse_fixed_vocabulary(graphs_with_labels)
+    feature_index = {name: idx for idx, name in enumerate(feature_names)}
+    matrix = np.zeros((len(graphs_with_labels), len(feature_names)), dtype=np.float32)
+
+    for row_idx, (graph, _) in enumerate(graphs_with_labels):
+        for edge in graph.edges:
+            col_idx = feature_index.get(_coarse_edge_key(graph, edge))
+            if col_idx is None:
+                continue
+            if mode == "count":
+                value = 1.0
+            elif mode == "abs_weight":
+                value = abs(edge.weight)
+            else:
+                raise ValueError(f"Unknown coarse fixed-layout mode: {mode}")
+            matrix[row_idx, col_idx] += np.float32(value)
+
+    return MatrixBundle(X=matrix, y=labels, feature_names=feature_names)
+
+
 def _wl_matrix(
     graphs_with_labels: list[tuple[PatchInfluenceGraph, SliceLabel]],
     *,
@@ -331,6 +444,7 @@ def _extreme_eigenpairs(
                 return_eigenvectors=True,
                 tol=1e-4,
                 maxiter=max(1000, 20 * n),
+                v0=np.linspace(1.0, 2.0, n, dtype=np.float64),
             )
         except ArpackNoConvergence as exc:
             if exc.eigenvalues.size >= k:
@@ -615,6 +729,8 @@ def _evaluate_seed(
     min_examples: int,
     wl_depth: int,
     spectral_values: int,
+    hashed_dim: int,
+    gnn_config: GNNTrainingConfig,
     null_repeats: int,
 ) -> dict:
     train_dataset, test_dataset, split_meta = _split_dataset_by_slice(
@@ -669,6 +785,48 @@ def _evaluate_seed(
         for kernel in ("linear", "rbf")
     }
 
+    for mode in ("sign", "weighted"):
+        hashed_train = _hashed_fixed_layout_matrix(
+            train_graphs,
+            dim=hashed_dim,
+            mode=mode,
+        )
+        hashed_test = _hashed_fixed_layout_matrix(
+            test_graphs,
+            dim=hashed_dim,
+            mode=mode,
+        )
+        result["metrics"][f"hashed_fixed_{mode}"] = {
+            kernel: _fit_eval_svm(
+                hashed_train,
+                hashed_test,
+                kernel=kernel,
+                seed=seed,
+            )
+            for kernel in ("linear", "rbf")
+        }
+
+    coarse_train = _coarse_fixed_layout_matrix(train_graphs, mode="count")
+    coarse_test = _coarse_fixed_layout_matrix(
+        test_graphs,
+        feature_names=coarse_train.feature_names,
+        mode="count",
+    )
+    result["metrics"]["coarse_fixed_count"] = {
+        kernel: _fit_eval_svm(coarse_train, coarse_test, kernel=kernel, seed=seed)
+        for kernel in ("linear", "rbf")
+    }
+
+    result["metrics"]["gnn_encoder_svm"] = {
+        kernel: fit_gnn_encoder_svm(
+            train_graphs,
+            test_graphs,
+            config=gnn_config,
+            svm_kernel=kernel,
+        ).to_dict()
+        for kernel in ("linear", "rbf")
+    }
+
     for mode in ("weighted", "binary_topology", "sign_topology"):
         train_bundle = _fixed_layout_matrix(train_graphs, mode=mode)
         test_bundle = _fixed_layout_matrix(
@@ -719,6 +877,14 @@ def _write_summary(path: Path, rows: list[dict]) -> None:
         "spectral_rbf",
         "graphlet_linear",
         "graphlet_rbf",
+        "hashed_sign_linear",
+        "hashed_sign_rbf",
+        "hashed_weighted_linear",
+        "hashed_weighted_rbf",
+        "coarse_count_linear",
+        "coarse_count_rbf",
+        "gnn_encoder_svm_linear",
+        "gnn_encoder_svm_rbf",
         "fixed_weighted_edge_shuffle_linear",
         "fixed_weighted_weight_shuffle_linear",
     ]
@@ -747,6 +913,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bootstrap-min-examples", type=int, default=3)
     parser.add_argument("--wl-depth", type=int, default=3)
     parser.add_argument("--spectral-values", type=int, default=16)
+    parser.add_argument("--hashed-dim", type=int, default=1024)
+    parser.add_argument("--gnn-device", default="cpu")
+    parser.add_argument("--gnn-hidden-dim", type=int, default=32)
+    parser.add_argument("--gnn-layers", type=int, default=2)
+    parser.add_argument("--gnn-dropout", type=float, default=0.1)
+    parser.add_argument("--gnn-lr", type=float, default=1e-2)
+    parser.add_argument("--gnn-weight-decay", type=float, default=1e-3)
+    parser.add_argument("--gnn-epochs", type=int, default=150)
     parser.add_argument("--null-repeats", type=int, default=10)
     parser.add_argument("--cache-root", default=None)
     parser.add_argument("--output-dir", default=None)
@@ -826,6 +1000,17 @@ def main() -> None:
                         min_examples=args.bootstrap_min_examples,
                         wl_depth=args.wl_depth,
                         spectral_values=args.spectral_values,
+                        hashed_dim=args.hashed_dim,
+                        gnn_config=GNNTrainingConfig(
+                            hidden_dim=args.gnn_hidden_dim,
+                            num_layers=args.gnn_layers,
+                            dropout=args.gnn_dropout,
+                            lr=args.gnn_lr,
+                            weight_decay=args.gnn_weight_decay,
+                            epochs=args.gnn_epochs,
+                            random_state=seed,
+                            device=args.gnn_device,
+                        ),
                         null_repeats=args.null_repeats,
                     )
                     report = {
@@ -837,6 +1022,16 @@ def main() -> None:
                         "num_examples_per_corruption": num_examples,
                         "corruptions": corruptions,
                         "max_tokens": max_tokens,
+                        "hashed_dim": args.hashed_dim,
+                        "gnn_encoder_config": {
+                            "hidden_dim": args.gnn_hidden_dim,
+                            "num_layers": args.gnn_layers,
+                            "dropout": args.gnn_dropout,
+                            "lr": args.gnn_lr,
+                            "weight_decay": args.gnn_weight_decay,
+                            "epochs": args.gnn_epochs,
+                            "device": args.gnn_device,
+                        },
                         "paper_decision": result,
                     }
                     with (runs_dir / f"{run_key}.json").open(
@@ -883,6 +1078,30 @@ def main() -> None:
                                 "accuracy"
                             ],
                             "graphlet_rbf": metrics["graphlet_shape"]["rbf"][
+                                "accuracy"
+                            ],
+                            "hashed_sign_linear": metrics["hashed_fixed_sign"][
+                                "linear"
+                            ]["accuracy"],
+                            "hashed_sign_rbf": metrics["hashed_fixed_sign"]["rbf"][
+                                "accuracy"
+                            ],
+                            "hashed_weighted_linear": metrics["hashed_fixed_weighted"][
+                                "linear"
+                            ]["accuracy"],
+                            "hashed_weighted_rbf": metrics["hashed_fixed_weighted"][
+                                "rbf"
+                            ]["accuracy"],
+                            "coarse_count_linear": metrics["coarse_fixed_count"][
+                                "linear"
+                            ]["accuracy"],
+                            "coarse_count_rbf": metrics["coarse_fixed_count"]["rbf"][
+                                "accuracy"
+                            ],
+                            "gnn_encoder_svm_linear": metrics["gnn_encoder_svm"][
+                                "linear"
+                            ]["accuracy"],
+                            "gnn_encoder_svm_rbf": metrics["gnn_encoder_svm"]["rbf"][
                                 "accuracy"
                             ],
                             "fixed_weighted_edge_shuffle_linear": weighted_nulls[

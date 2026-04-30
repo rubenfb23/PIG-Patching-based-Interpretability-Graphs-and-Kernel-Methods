@@ -2,7 +2,7 @@
 
 import pytest
 
-from pig.gnn import GNNTrainingConfig, cross_validate_gnn_baseline
+from pig.gnn import GNNTrainingConfig, cross_validate_gnn_baseline, fit_gnn_encoder_svm
 from pig.graph import Edge, Node, PatchInfluenceGraph
 from pig.prompts import SliceLabel
 
@@ -64,3 +64,32 @@ def test_cross_validate_gnn_baseline_requires_two_samples_per_class():
                 (_make_graph("abba", -0.5), label_b),
             ]
         )
+
+
+def test_fit_gnn_encoder_svm_returns_embedding_metrics():
+    train_graphs = []
+    test_graphs = []
+    for idx in range(4):
+        label = SliceLabel(task="ioi", corruption="name_swap")
+        train_graphs.append((_make_graph("name_swap", 0.7 + idx * 0.01), label))
+        test_graphs.append((_make_graph("name_swap", 0.8 + idx * 0.01), label))
+    for idx in range(4):
+        label = SliceLabel(task="ioi", corruption="abba")
+        train_graphs.append((_make_graph("abba", -0.7 - idx * 0.01), label))
+        test_graphs.append((_make_graph("abba", -0.8 - idx * 0.01), label))
+
+    result = fit_gnn_encoder_svm(
+        train_graphs,
+        test_graphs,
+        config=GNNTrainingConfig(
+            hidden_dim=8,
+            epochs=5,
+            random_state=7,
+            device="cpu",
+        ),
+    )
+
+    assert result.num_train == 8
+    assert result.num_test == 8
+    assert result.embedding_dim == 16
+    assert 0.0 <= result.accuracy <= 1.0

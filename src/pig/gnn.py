@@ -11,7 +11,11 @@ from typing import Optional
 
 import numpy as np
 import torch
+from sklearn.metrics import accuracy_score
 from sklearn.model_selection import StratifiedKFold
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.svm import SVC
 from torch import nn
 from torch.nn import functional as F
 
@@ -55,6 +59,26 @@ class GNNCVResult:
         }
 
 
+@dataclass
+class GNNEncoderSVMResult:
+    """Example-disjoint result for a supervised GNN encoder followed by SVM."""
+
+    accuracy: float
+    num_train: int
+    num_test: int
+    embedding_dim: int
+    svm_kernel: str
+
+    def to_dict(self) -> dict:
+        return {
+            "accuracy": self.accuracy,
+            "num_train": self.num_train,
+            "num_test": self.num_test,
+            "embedding_dim": self.embedding_dim,
+            "svm_kernel": self.svm_kernel,
+        }
+
+
 class SimpleMessagePassingGNN(nn.Module):
     """Directed weighted message-passing graph classifier."""
 
@@ -88,6 +112,16 @@ class SimpleMessagePassingGNN(nn.Module):
         adjacency: torch.Tensor,
         mask: torch.Tensor,
     ) -> torch.Tensor:
+        graph_repr = self.encode(node_features, adjacency, mask)
+        return self.classifier(graph_repr)
+
+    def encode(
+        self,
+        node_features: torch.Tensor,
+        adjacency: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return the pooled graph representation before the classifier."""
         h = F.relu(self.input_proj(node_features))
         h = h * mask.unsqueeze(-1)
 
@@ -103,7 +137,7 @@ class SimpleMessagePassingGNN(nn.Module):
             torch.isfinite(pooled_max), pooled_max, torch.zeros_like(pooled_max)
         )
         graph_repr = torch.cat([pooled_mean, pooled_max], dim=-1)
-        return self.classifier(graph_repr)
+        return graph_repr
 
 
 def cross_validate_gnn_baseline(
@@ -160,6 +194,104 @@ def cross_validate_gnn_baseline(
         cv_folds=int(cv_splitter.get_n_splits()),
         num_graphs=len(graphs_with_labels),
     )
+
+
+def fit_gnn_encoder_svm(
+    train_graphs_with_labels: list[tuple[PatchInfluenceGraph, SliceLabel]],
+    test_graphs_with_labels: list[tuple[PatchInfluenceGraph, SliceLabel]],
+    *,
+    config: Optional[GNNTrainingConfig] = None,
+    svm_kernel: str = "linear",
+) -> GNNEncoderSVMResult:
+    """Train a supervised GNN encoder on train graphs and classify embeddings with SVM."""
+    if config is None:
+        config = GNNTrainingConfig()
+    if not train_graphs_with_labels or not test_graphs_with_labels:
+        raise ValueError("train and test graph lists must not be empty")
+
+    train_graphs = [graph for graph, _ in train_graphs_with_labels]
+    test_graphs = [graph for graph, _ in test_graphs_with_labels]
+    label_encoder = LabelEncoder()
+    y_train = label_encoder.fit_transform(
+        [str(label) for _, label in train_graphs_with_labels]
+    )
+    y_test = label_encoder.transform(
+        [str(label) for _, label in test_graphs_with_labels]
+    )
+
+    train_embeddings, test_embeddings = _train_encoder_embeddings(
+        train_graphs,
+        y_train,
+        test_graphs,
+        num_classes=len(label_encoder.classes_),
+        config=config,
+    )
+    estimator = Pipeline(
+        steps=[
+            ("scaler", StandardScaler()),
+            (
+                "svm",
+                SVC(
+                    kernel=svm_kernel,
+                    C=1.0,
+                    gamma="scale",
+                    random_state=config.random_state,
+                    probability=False,
+                ),
+            ),
+        ]
+    )
+    estimator.fit(train_embeddings, y_train)
+    predictions = estimator.predict(test_embeddings)
+    return GNNEncoderSVMResult(
+        accuracy=float(accuracy_score(y_test, predictions)),
+        num_train=int(train_embeddings.shape[0]),
+        num_test=int(test_embeddings.shape[0]),
+        embedding_dim=int(train_embeddings.shape[1]),
+        svm_kernel=svm_kernel,
+    )
+
+
+def _train_encoder_embeddings(
+    train_graphs: list[PatchInfluenceGraph],
+    train_labels: np.ndarray,
+    test_graphs: list[PatchInfluenceGraph],
+    *,
+    num_classes: int,
+    config: GNNTrainingConfig,
+) -> tuple[np.ndarray, np.ndarray]:
+    device = torch.device(config.device)
+    _seed_torch(config.random_state)
+    train_batch = _graphs_to_batch(train_graphs, device=device)
+    test_batch = _graphs_to_batch(test_graphs, device=device)
+    y_train = torch.as_tensor(train_labels, dtype=torch.long, device=device)
+
+    model = SimpleMessagePassingGNN(
+        input_dim=train_batch[0].shape[-1],
+        hidden_dim=config.hidden_dim,
+        num_classes=num_classes,
+        num_layers=config.num_layers,
+        dropout=config.dropout,
+    ).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config.lr,
+        weight_decay=config.weight_decay,
+    )
+
+    for _ in range(config.epochs):
+        model.train()
+        optimizer.zero_grad()
+        logits = model(*train_batch)
+        loss = F.cross_entropy(logits, y_train)
+        loss.backward()
+        optimizer.step()
+
+    model.eval()
+    with torch.no_grad():
+        train_embeddings = model.encode(*train_batch).detach().cpu().numpy()
+        test_embeddings = model.encode(*test_batch).detach().cpu().numpy()
+    return train_embeddings, test_embeddings
 
 
 def _train_eval_fold(
