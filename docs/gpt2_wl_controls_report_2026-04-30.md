@@ -66,7 +66,7 @@ La formula es:
 ```math
 E_u^{(i)}
 =
-O(\operatorname{patch}(x_{\mathrm{crp}}^{(i)}; u \leftarrow x_{\mathrm{cln}}^{(i)}))
+O(\mathrm{patch}(x_{\mathrm{crp}}^{(i)}; u \leftarrow x_{\mathrm{cln}}^{(i)}))
 -
 O(x_{\mathrm{crp}}^{(i)})
 ```
@@ -153,7 +153,7 @@ Etiqueta inicial:
 ```math
 \ell_v^{(0)}
 =
-(\operatorname{layer}(v), \operatorname{token}(v), \operatorname{type}(v), \operatorname{head}(v))
+(\mathrm{layer}(v), \mathrm{token}(v), \mathrm{type}(v), \mathrm{head}(v))
 ```
 
 Refinamiento WL:
@@ -161,10 +161,10 @@ Refinamiento WL:
 ```math
 \ell_v^{(h)}
 =
-\operatorname{hash}
+\mathrm{hash}
 \left(
     \ell_v^{(h-1)},
-    \operatorname{sort}
+    \mathrm{sort}
     \left\{
         (\ell_z^{(h-1)}, b(w_{vz})) : (v,z) \in E
     \right\}
@@ -230,7 +230,7 @@ El peso entre nodos se define por correlacion entre perfiles de efectos:
 ```math
 w_{uv}^{(s)}
 =
-\operatorname{corr}
+\mathrm{corr}
 \left(
     (E_u^{(i)})_{i \in s},
     (E_v^{(i)})_{i \in s}
@@ -252,7 +252,7 @@ E_s
 =
 \left\{
     (u,v) :
-    v \in \operatorname{TopK}_v(|w_{uv}^{(s)}|)
+    v \in \mathrm{TopK}_v(|w_{uv}^{(s)}|)
 \right\}
 ```
 
@@ -263,13 +263,13 @@ Solucion nueva: bootstrap. Para cada slice, re-muestreamos ejemplos con reemplaz
 ```math
 B_{s,b}
 \sim
-\operatorname{Bootstrap}(\{i : i \in s\})
+\mathrm{Bootstrap}(\{i : i \in s\})
 ```
 
 ```math
 G_{s,b}
 =
-\operatorname{GraphBuilder}(B_{s,b})
+\mathrm{GraphBuilder}(B_{s,b})
 ```
 
 Donde `b` es el indice del bootstrap.
@@ -392,9 +392,9 @@ Definimos:
 ```math
 \Delta_{\mathrm{null}}
 =
-\operatorname{Acc}_{\mathrm{observada}}
+\mathrm{Acc}_{\mathrm{observada}}
 -
-\mathbb{E}[\operatorname{Acc}_{\mathrm{null}}]
+\mathbb{E}[\mathrm{Acc}_{\mathrm{null}}]
 ```
 
 Si `Delta` es alto, la senal observada sobrevive al control nulo.
@@ -427,7 +427,7 @@ Conserva los pesos pero cambia los endpoints:
 ```math
 E'
 \sim
-\operatorname{ShuffleEndpoints}(E)
+\mathrm{ShuffleEndpoints}(E)
 ```
 
 ```math
