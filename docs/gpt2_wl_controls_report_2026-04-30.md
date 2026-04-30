@@ -49,6 +49,440 @@ Patch effects
 
 La evaluacion causal no se cambio. Solo se ampliaron las comparaciones auxiliares de representacion.
 
+## Explicacion desde cero
+
+### 0. Que mide PIG antes de construir grafos
+
+PIG empieza con pares de prompts:
+
+- `x_cln`: prompt limpio, donde el modelo deberia comportarse bien.
+- `x_crp`: prompt corrupto, donde cambiamos algo para romper o alterar ese comportamiento.
+- `y_star`: token/objetivo que queremos medir.
+
+Para cada nodo interno del transformer `u` se hace activation patching: se ejecuta el prompt corrupto, pero en el nodo `u` se reemplaza la activacion corrupta por la activacion limpia. Luego se mide cuanto mejora el score del comportamiento objetivo.
+
+La formula es:
+
+```math
+E_u^{(i)}
+=
+O(\operatorname{patch}(x_{\mathrm{crp}}^{(i)}; u \leftarrow x_{\mathrm{cln}}^{(i)}))
+-
+O(x_{\mathrm{crp}}^{(i)})
+```
+
+Donde:
+
+- `i` es el ejemplo.
+- `u` es un nodo interno, por ejemplo `(layer, token, component)`.
+- `O(x)` es el observable que mide el comportamiento objetivo.
+- `E_u^{(i)}` es el efecto causal individual de parchear el nodo `u` en el ejemplo `i`.
+
+Intuicion:
+
+```text
+E_u alto y positivo  -> ese nodo ayuda a recuperar el comportamiento limpio
+E_u cercano a cero   -> parchear ese nodo casi no cambia nada
+E_u negativo         -> parchear ese nodo empeora el objetivo
+```
+
+Esto es la materia prima. Todo lo demas intenta responder: como convertimos muchos efectos `E_u` en una representacion comparable entre corrupciones?
+
+### 1. Antes: WL sobre grafos por ejemplo
+
+Antes teniamos esta ruta auxiliar:
+
+```text
+Efectos de patching por ejemplo
+    |
+    v
+Grafo por ejemplo
+    |
+    v
+WL features
+    |
+    v
+SVM linear/RBF
+```
+
+El grafo por ejemplo no es el objeto principal de PIG. Se construye para tener muchas muestras para clasificadores. Para un ejemplo `i`, cada nodo tiene un efecto `E_u^{(i)}`. La arista entre dos nodos se define por similitud de magnitud:
+
+```math
+w_{uv}^{(i)}
+=
+\frac{1}{1 + |E_u^{(i)} - E_v^{(i)}|}
+```
+
+Si dos nodos tienen efectos parecidos, el peso se acerca a `1`. Si tienen efectos muy distintos, el peso baja.
+
+Despues se aplica top-k: para cada nodo `u`, se conservan solo las `k` aristas salientes mas fuertes.
+
+Que aporta:
+
+- Da suficientes muestras para entrenar SVM.
+- Permite comprobar si los grafos contienen senal para distinguir slices.
+- Sirve como baseline historico.
+
+Pros:
+
+- Es simple y barato.
+- Ya estaba implementado y validado.
+- Reproduce resultados anteriores exactamente.
+
+Contras:
+
+- No es el grafo canonico del metodo.
+- La formula mide similitud de efectos dentro de un ejemplo, no co-variacion entre ejemplos.
+- Puede capturar artefactos de magnitud mas que estructura causal estable.
+
+Resultado GPT-2:
+
+```text
+WL per-example linear = 0.6667
+WL per-example RBF    = 0.6250
+```
+
+Lectura: hay senal real, pero moderada.
+
+### 2. WL: que hace matematicamente
+
+WL significa Weisfeiler-Lehman. Es una forma clasica de convertir un grafo en un vector de features. La idea es etiquetar cada nodo por su identidad inicial y luego refinar esa etiqueta mirando sus vecinos.
+
+Etiqueta inicial:
+
+```math
+\ell_v^{(0)}
+=
+(\operatorname{layer}(v), \operatorname{token}(v), \operatorname{type}(v), \operatorname{head}(v))
+```
+
+Refinamiento WL:
+
+```math
+\ell_v^{(h)}
+=
+\operatorname{hash}
+\left(
+    \ell_v^{(h-1)},
+    \operatorname{sort}
+    \left\{
+        (\ell_z^{(h-1)}, b(w_{vz})) : (v,z) \in E
+    \right\}
+\right)
+```
+
+Donde:
+
+- `h` es la profundidad WL.
+- `z` son vecinos salientes de `v`.
+- `w_vz` es el peso de la arista.
+- `b(w_vz)` es una discretizacion del peso.
+- `hash` produce una nueva etiqueta compacta.
+
+El vector final cuenta cuantas veces aparece cada etiqueta:
+
+```math
+\phi_a(G)
+=
+\sum_{h=0}^{H}
+\sum_{v \in V}
+\mathbf{1}[\ell_v^{(h)} = a]
+```
+
+Intuicion:
+
+```text
+WL no guarda la matriz completa del grafo.
+WL cuenta patrones locales de vecindario.
+Dos grafos son parecidos si tienen histogramas parecidos de patrones locales.
+```
+
+Que aporta:
+
+- Da un embedding fijo para grafos con estructura variable.
+- Captura patrones locales de conectividad.
+- Es interpretable como conteo de subestructuras.
+
+Pros:
+
+- Baseline clasico y defendible.
+- Funciona con SVM sin entrenar una red neuronal.
+- Menos propenso a sobreajuste que una GNN en datasets pequenos.
+
+Contras:
+
+- Puede perder informacion posicional fina.
+- Depende de como se discreticen los pesos.
+- Si todos los grafos tienen el mismo layout fijo, WL puede ser menos directo que usar los edge slots reales.
+
+### 3. Nuevo: bootstrap slice graphs
+
+El objeto canonico de PIG es el grafo por slice, no el grafo por ejemplo. Un slice es una familia de ejemplos, por ejemplo `name_swap` o `abba`.
+
+Para un slice `s`, se construye una matriz de efectos:
+
+```math
+X_s[i,u] = E_u^{(i)}
+```
+
+El peso entre nodos se define por correlacion entre perfiles de efectos:
+
+```math
+w_{uv}^{(s)}
+=
+\operatorname{corr}
+\left(
+    (E_u^{(i)})_{i \in s},
+    (E_v^{(i)})_{i \in s}
+\right)
+```
+
+Luego se impone direccion forward:
+
+```math
+u \rightarrow v
+\quad \text{solo si} \quad
+u < v
+```
+
+Y se aplica top-k:
+
+```math
+E_s
+=
+\left\{
+    (u,v) :
+    v \in \operatorname{TopK}_v(|w_{uv}^{(s)}|)
+\right\}
+```
+
+Problema: con un grafo por slice solo tenemos muy pocas muestras para clasificar.
+
+Solucion nueva: bootstrap. Para cada slice, re-muestreamos ejemplos con reemplazo y construimos muchos grafos slice-like:
+
+```math
+B_{s,b}
+\sim
+\operatorname{Bootstrap}(\{i : i \in s\})
+```
+
+```math
+G_{s,b}
+=
+\operatorname{GraphBuilder}(B_{s,b})
+```
+
+Donde `b` es el indice del bootstrap.
+
+Visualmente:
+
+```text
+Slice name_swap: 20 ejemplos
+    |
+    +--> bootstrap 1 -> grafo name_swap #1
+    +--> bootstrap 2 -> grafo name_swap #2
+    +--> ...
+
+Slice abba: 20 ejemplos
+    |
+    +--> bootstrap 1 -> grafo abba #1
+    +--> bootstrap 2 -> grafo abba #2
+    +--> ...
+```
+
+Que aporta:
+
+- Mantiene la semantica del grafo canonico por slice.
+- Da mas muestras para entrenar clasificadores.
+- Permite comparar WL sobre grafos mas cercanos al metodo principal.
+
+Pros:
+
+- Mas metodologicamente correcto que per-example graphs.
+- Mejor delta contra null controls.
+- Linear SVM mejora claramente en GPT-2.
+
+Contras:
+
+- Las muestras bootstrap no son completamente independientes.
+- RBF no funciono bien en esta configuracion.
+- Hay que reportarlo como evidencia auxiliar, no como prueba causal principal.
+
+Resultado GPT-2:
+
+```text
+WL bootstrap-slice linear = 0.8000
+WL bootstrap-slice RBF    = 0.4867
+```
+
+Lectura: el linear mejora; RBF cae a azar, asi que la geometria no lineal no parece fiable aqui.
+
+### 4. Nuevo: fixed-layout edge features
+
+Los grafos PIG tienen una propiedad importante: todos comparten el mismo significado de nodo. El nodo `(layer=3, token=5, component=res)` significa lo mismo en todos los grafos.
+
+Por eso probamos una representacion mas directa que WL: en vez de contar patrones, vectorizamos cada posible arista `u -> v`.
+
+Formula:
+
+```math
+\psi_{uv}(G)
+=
+\begin{cases}
+w_{uv}, & \text{si } (u,v) \in E(G) \\
+0,      & \text{si } (u,v) \notin E(G)
+\end{cases}
+```
+
+El vector completo es:
+
+```math
+\psi(G)
+=
+(\psi_{u_1v_1}(G), \psi_{u_1v_2}(G), \ldots, \psi_{u_nv_n}(G))
+```
+
+Intuicion:
+
+```text
+WL pregunta:
+  "Que patrones locales aparecen en el grafo?"
+
+Fixed-layout pregunta:
+  "Cuanto pesa exactamente cada conexion layer/token -> layer/token?"
+```
+
+Que aporta:
+
+- Aprovecha que el layout del transformer es fijo.
+- No pierde identidad posicional.
+- Sirve como baseline fuerte y muy simple.
+
+Pros:
+
+- Accuracy mas alta en GPT-2.
+- Muy interpretable: cada feature es una arista concreta.
+- No requiere GNN ni entrenamiento profundo.
+
+Contras:
+
+- Puede capturar distribuciones de pesos por posicion, no solo topologia.
+- Si cambia el layout del modelo o tokenizacion, hay que alinear dimensiones.
+- Puede sobreajustar si hay pocos grafos bootstrap.
+
+Resultado GPT-2:
+
+```text
+Fixed-layout bootstrap linear = 1.0000
+Fixed-layout bootstrap RBF    = 0.8433
+```
+
+Lectura: es la representacion con mas accuracy. Pero hay que mirar controles nulos antes de interpretarla como estructura causal.
+
+### 5. Nuevo: null controls
+
+Los null controls responden una pregunta critica:
+
+```text
+La accuracy viene de estructura real o de un artefacto facil?
+```
+
+Definimos:
+
+```math
+\Delta_{\mathrm{null}}
+=
+\operatorname{Acc}_{\mathrm{observada}}
+-
+\mathbb{E}[\operatorname{Acc}_{\mathrm{null}}]
+```
+
+Si `Delta` es alto, la senal observada sobrevive al control nulo.
+
+#### 5.1 Label permutation
+
+Permuta las etiquetas de clase:
+
+```math
+y_i'
+=
+y_{\pi(i)}
+```
+
+Las features no cambian. Si la accuracy sigue alta, el clasificador esta explotando azar o leakage.
+
+Pros:
+
+- Control basico imprescindible.
+- Detecta leakage obvio.
+
+Contras:
+
+- No dice si la senal es topologica o de pesos.
+
+#### 5.2 Edge shuffle
+
+Conserva los pesos pero cambia los endpoints:
+
+```math
+E'
+\sim
+\operatorname{ShuffleEndpoints}(E)
+```
+
+```math
+\{w_e' : e \in E'\}
+=
+\{w_e : e \in E\}
+```
+
+Si la accuracy cae, la posicion/topologia de las aristas importaba.
+
+Pros:
+
+- Testea si importa donde estan las conexiones.
+- Mantiene la distribucion global de pesos.
+
+Contras:
+
+- Puede crear grafos artificiales poco realistas.
+- No preserva necesariamente grados exactos.
+
+#### 5.3 Weight shuffle
+
+Conserva la topologia pero permuta pesos:
+
+```math
+E' = E
+```
+
+```math
+w_e'
+=
+w_{\pi(e)}
+```
+
+Si la accuracy cae, los pesos correctos en las aristas correctas importaban.
+
+Pros:
+
+- Separa topologia de asignacion de pesos.
+- Muy util para interpretar fixed-layout.
+
+Contras:
+
+- Si las distribuciones de pesos ya separan clases, puede no destruir toda la senal.
+- No prueba causalidad por si solo.
+
+## Resumen de pros y contras
+
+| Representacion | Que prueba | Pros | Contras |
+|---|---|---|---|
+| WL per-example | Si grafos auxiliares por ejemplo separan slices | Simple, historico, reproducible | No es el objeto canonico; senal moderada |
+| WL bootstrap-slice | Si grafos tipo slice separan clases usando WL | Mas cercano al metodo principal; buenos null deltas | RBF debil; muestras bootstrap dependientes |
+| Fixed-layout bootstrap | Si los edge slots reales separan clases | Mejor accuracy; interpretable por arista | Weight-shuffle delta bajo; puede capturar patrones de pesos |
+| GNN, no implementada | Si una red aprende mejores embeddings | Flexible; puede usar atributos ricos | Mas riesgo de overfit; menos interpretable; requiere mas datos |
+
 ## Cambios de codigo
 
 ### `src/pig/graph.py`
