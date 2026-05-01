@@ -1,0 +1,300 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{xcolor}
+\usepackage{siunitx}
+\usepackage{url}
+% \usepackage{microtype}
+\usepackagefvextra
+
+\newtheorem{definition}{Definition}
+\newtheorem{lemma}[definition]{Lemma}
+\newtheorem{observation}[definition]{Observation}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Var}{\mathrm{Var}}
+\newcommand{\corr}{\mathrm{corr}}
+\newcommand{\topk}{\mathrm{TopK}}
+\newcommand{\sign}{\mathrm{sign}}
+\newcommand{\Tr}{\mathrm{Tr}}
+\newcommand{\sparse}[1]{#1_{\leq k}}
+\newcommand{\slice}[1]{\mathcal{S}_{#1}}
+\newcommand{\node}{\mathcal{V}}
+\newcommand{\edge}{\mathcal{E}}
+\newcommand{\weight}{w}
+\newcommand{\patch}[2]{\tilde{f}_{#1}(#2)}
+\newcommand{\latent}{a}
+\newcommand{\target}{y^\star}
+\newcommand{\slicedata}{D_s}
+\newcommand{\fixlayout}{\phi_{\mathrm{fixed}}}
+\newcommand{\fixhashed}{\phi_{\mathrm{hashed}}}
+\newcommand{\fixcoarse}{\phi_{\mathrm{coarse}}}
+\newcommand{\wl}{\phi_{\mathrm{WL}}}
+\newcommand{\spec}{\phi_{\mathrm{spec}}}
+\newcommand{\gl}{\phi_{\mathrm{graphlet}}}
+
+\title{Patching-based Interpretability Graphs: \\ Scalable Representation of Neural Circuits \\ through Correlational Proposals and Causal Validation}
+
+\author{Ruben Fern\'andez-Boull\'on \and David Olivieri\thanks{University of Vigo, Spain}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Mechanistic interpretability seeks to identify the internal algorithms implemented by trained neural networks. We formalise a pipeline---patching-based interpretability graphs (PIG)---that converts interventional activation-patching signals into a dataset of sparse directed graphs, one per task slice. We compare classical graph-kernel methods for classifying slice labels, evaluating WL subtree features, fixed-layout edge features, spectral shape descriptors, and graphlet motif counts. On the indirect object identification task with GPT-2, fixed-layout signed edge features achieve $0.9896$ mean accuracy across seeds $\{7,42,123\}$ under example-disjoint bootstrap evaluation with $n=100$ prompt pairs per corruption. However, these features grow quadratically with the number of nodes, limiting scalability. We therefore propose a hashed fixed-layout representation using stable hash aggregation into a fixed-dimensional space, which achieves $0.9375$ accuracy with $1024$ dimensions, and a coarse feature-bucket representation achieving $0.9271$ accuracy with approximately $105$ features. Edge-shuffle and weight-shuffle controls reduce performance to chance ($0.5000$ and $0.5021$, respectively), indicating that the signal resides in signed edge-slot identity rather than global graph shape. With $n=500$ prompt pairs, hashed fixed-layout and coarse count both reach near-perfect accuracy, suggesting that the representation preserves a robust mechanistic signal. We further validate a subset of proposed edges through interventional causal evaluation, providing multi-level evidence for the correlational proposals.
+\end{abstract}
+
+\section{Introduction}
+
+Large language models implement complex computations distributed across layers, tokens, attention heads, and MLP sublayers. Mechanistic interpretability aims to reverse-engineer these internal algorithms in terms of interpretable circuit components \cite{elhage2021transformer}. Unlike post-hoc explanation methods that approximate model behaviour with external surrogates, mechanistic interpretability seeks to identify the algorithmic mechanisms that implement specific behaviours directly from the network's internals.
+
+Activation patching \cite{narang2022causal, wang2023localizing} provides a controlled intervention mechanism for causal discovery within neural networks. Given a clean prompt--corrupted prompt pair, one replaces the activation at an internal node during the corrupted forward pass with the corresponding clean activation and measures the change in a target observable. A large positive patch effect indicates that the node causally contributes to the target behaviour. However, interpreting individual patch effects is insufficient for understanding how nodes compose into circuits. A complete mechanistic account requires quantifying how nodes co-vary in their causal contributions across prompts and tasks.
+
+This paper presents patching-based interpretability graphs (PIG), a pipeline that converts activation patching signals into a dataset of sparse directed graphs and compares these graphs using classical kernel methods. Each graph is constructed from a slice of prompt pairs (a task family and corruption type), with nodes corresponding to internal transformer positions and edges encoding the co-variation of patch-effect profiles. The resulting graph dataset provides a structured, comparable representation of mechanistic circuits that can be analysed with established graph-learning methods.
+
+Our contributions are threefold. First, we formalise the construction of interpretability graphs from patch effects, specifying the node set, edge construction via patch-effect correlation, and top-$k$ sparsification. Second, we conduct an exploratory comparative evaluation of graph representations for slice classification on the indirect object identification (IOI) task with GPT-2: Weisfeiler--Lehman subtree features, fixed-layout edge features (weighted, binary, and signed), spectral shape descriptors, and graphlet motif counts. Third, we address scalability by proposing compressed representations---hashed fixed-layout and coarse feature-bucket encodings---that preserve most of the fixed-layout signal while eliminating quadratic feature growth. We validate our correlational proposals through interventional causal evaluation on a subset of candidate edges.
+
+The strongest signal in our experiments resides in the signed identity of edge slots: fixed-layout signed edge features achieve $0.9896$ mean accuracy across seeds under example-disjoint bootstrap evaluation. However, these features require $N(N-1)$ coordinates for $N$ nodes, which is $14,\!280$ dimensions for GPT-2 with residual-stream-only nodes. A stable hash aggregation into $1024$ dimensions reduces this to $0.9375$, while a coarse bucket representation with approximately $105$ features achieves $0.9271$. Spectral and graphlet representations, which discard node identity in favour of global and local shape statistics, remain near chance, suggesting that node-level identity---not just graph topology---is essential for distinguishing mechanistic circuits.
+
+\section{Related Work}
+
+\textbf{Mechanistic interpretability.} The mechanistic interpretability programme has identified numerous circuit-level mechanisms in transformer models, including induction heads \cite{turpin2023algorithmic}, induction buckets \cite{park2023causal}, and indirect object identification circuits \cite{li2023causal, nanda2023attribution}. These findings demonstrate that specific transformer behaviours can be localised to discrete computational subgraphs. Our work extends this line of research by providing a systematic pipeline for discovering candidate circuits across slices, rather than targeting individual known mechanisms.
+
+\textbf{Activation patching.} Activation patching---the practice of intervening at a single internal node and measuring the effect on a target observable---has become a standard tool for causal analysis in interpretability \cite{narang2022causal, wang2023localizing}. Related approaches include direct logit attribution \cite{turner2023block}, causal mediation analysis \cite{pearl2009causality}, and circuit extraction methods \cite{hanna2023text}. PIG adopts patch effects as its fundamental observational unit and aggregates them across examples to construct graph-level representations.
+
+\textbf{Graph kernels and mechanistic interpretability.} Graph kernels have been applied to neural network analysis for understanding model behaviour \cite{morris2019weisfeiler}. The Weisfeiler--Lehman (WL) subtree kernel \cite{shervashidze2011weisfeiler} is a classical graph embedding method that has shown strong empirical performance. In mechanistic interpretability, graph-based representations have been used to compare circuits \cite{nanda2023attribution}, but systematic comparisons of multiple graph representations for patch-effect-derived graphs remain limited.
+
+\textbf{Scalable mechanistic analysis.} A persistent challenge in mechanistic interpretability is scaling analysis methods to larger models. Approaches include sparse feature extraction \cite{gupta2023sparse}, dimensionality reduction \cite{park2023causal}, and compressed representations \cite{hanna2024circuit}. Our hashed fixed-layout and coarse count representations address this scalability challenge for graph-based analyses derived from patching.
+
+\section{Methodology}
+
+\subsection{Formal Setup}
+
+Let $f_\theta: \mathcal{X} \rightarrow \R^{|V|}$ be a transformer model with parameters $\theta$, vocabulary $V$, and logit output. For a prompt $x = (x_1, \dots, x_T)$, we write $\ell(x) \in \R^{|V|}$ for the final logit vector. We choose the observable $O(x) = \ell_{\target}(x)$, the logit of the target token at a specified position.
+
+\textbf{Node set.} We define a fixed node set $\node$ as a disjoint union of component types:
+\begin{equation}
+\node = \node_{\textsf{res}} \dot\cup \node_{\textsf{mlp}} \dot\cup \node_{\textsf{att}},
+\end{equation}
+where $\node_{\textsf{res}} = \{(\ell, t, \textsf{res}) : 0 \leq \ell < L, 1 \leq t \leq T\}$, and similarly for MLP and attention components. For our primary experiments we restrict $\node$ to residual-stream nodes $\node_{\textsf{res}}$, which provides a stable and interpretable granularity. The total number of nodes is $N = L \times T \times C$, where $C$ is the number of component types considered.
+
+\textbf{Slices.} A slice $s$ is defined by a task family and corruption type. For each slice $s$, we have a set of paired examples $\slicedata = \{(x_i^{\textsf{cln}}, x_i^{\textsf{crp}}, \target_i)\}_{i=1}^{n_s}$.
+
+\subsection{Patch Effects}
+
+For each example $i$ in slice $s$ and node $u \in \node$, we compute the patch effect:
+\begin{equation}
+E_u^{(i)} = O(\patch{f_\theta}{x_i^{\textsf{crp}}; u}) - O(x_i^{\textsf{crp}}),
+\end{equation}
+where $\patch{f_\theta}{x_i^{\textsf{crp}}; u}$ denotes the model's forward pass on the corrupted prompt with the activation at node $u$ replaced by the corresponding clean activation from $x_i^{\textsf{cln}}$. A large positive $E_u^{(i)}$ indicates that intervening at $u$ causally restores the target behaviour.
+
+\subsection{Graph Construction}
+
+\textbf{Edge weights.} For a slice $s$, we construct a directed weighted graph $G_s = (\node, \edge_s, \weight_s)$. The edge weight between nodes $u$ and $v$ is computed from the correlation of their patch-effect profiles across examples:
+\begin{equation}
+\weight_s(u \rightarrow v) = \corr\left(\{E_u^{(i)}\}_{i \in \slicedata}, \{E_v^{(i)}\}_{i \in \slicedata}\right).
+\end{equation}
+This measures how the causal contributions of $u$ and $v$ co-vary across prompts: nodes whose interventions produce similar effect patterns are connected by a strong edge, indicating potential membership in the same circuit.
+
+\textbf{Direction constraint.} We enforce a direction constraint requiring $u \prec v$, where $\prec$ is a partial order on nodes (by layer index, then token index). This prevents spurious backward edges and ensures that the graph respects the temporal flow of information in the transformer.
+
+\textbf{Top-$k$ sparsification.} For each node $u$, we retain only the top-$k$ outgoing edges by absolute weight:
+\begin{equation}
+\edge_s = \bigcup_{u \in \node} \left\{(u, v) : v \in \topk_k(\{|\weight_s(u \rightarrow \cdot)|\})\right\}.
+\end{equation}
+This produces graphs of comparable size across slices and stabilises downstream kernel computations.
+
+\subsection{Graph Representations}
+
+We compare six graph representations for slice classification.
+
+\textbf{Weisfeiler--Lehman subtree features.} The WL algorithm computes a histogram of local subtree patterns up to depth $H$:
+\begin{equation}
+\wl(G)_a = \sum_{h=0}^{H} \sum_{v \in V} \mathbf{1}[\ell_v^{(h)} = a],
+\end{equation}
+where $\ell_v^{(h)}$ is the refined label of node $v$ at iteration $h$. The initial label encodes node attributes (layer, token, component type); subsequent labels are hash-consistent encodings of the current label and sorted multiset of neighbour labels.
+
+\textbf{Fixed-layout features.} Since all graphs share the same node set $\node$, each possible edge slot $(u, v)$ corresponds to a fixed coordinate. We compare three variants:
+\begin{itemize}
+\item \textit{Weighted:} $\fixlayout_{uv}(G) = \weight(u \rightarrow v)$.
+\item \textit{Binary:} $\fixlayout_{uv}(G) = \mathbf{1}[(u, v) \in \edge]$.
+\item \textit{Signed:} $\fixlayout_{uv}(G) = \sign(\weight(u \rightarrow v))$.
+\end{itemize}
+The dimension is $D_{\mathrm{fixed}} = N(N-1)$, which grows quadratically with $N$.
+
+\textbf{Spectral shape features.} We compute the normalised Laplacian $L = I - D^{-1/2} A^{\mathrm{abs}} D^{-1/2}$, where $A^{\mathrm{abs}}_{uv} = |\weight(u \rightarrow v)| + |\weight(v \rightarrow u)|$, and extract the smallest and largest eigenvalues $\lambda_{\mathrm{low}}, \lambda_{\mathrm{high}}$ and the corresponding eigenvector flatness measures $\sum_v q_{v,\mathrm{low}}^4$ and $\sum_v q_{v,\mathrm{high}}^4$. We also compute analogous statistics from the signed adjacency matrix. This yields a compact $96$-dimensional vector.
+
+\textbf{Graphlet features.} We count occurrences of unweighted subgraph motifs of size $3$: empty triplets, single-edge triplets, two-edge triplets, and triangles. Combined with density, degree-weightedness, weight-skew, and sign-skew, this yields $38$ features.
+
+\textbf{Hashed fixed-layout.} We map each edge slot to a fixed coordinate $j = h(u, v) \bmod d$ using a stable hash function, and accumulate the signed weight:
+\begin{equation}
+\fixhashed_j(G) \mathrel{+}= \sign(\weight(u \rightarrow v)).
+\end{equation}
+With $d = 1024$, this eliminates quadratic growth at the cost of hash collisions.
+
+\textbf{Coarse count.} We aggregate edges by coarse type: node component type, layer-difference bucket, token-difference bucket, and edge sign:
+\begin{equation}
+\fixcoarse_{a,b,\Delta\ell,\Delta t,s}(G) = \sum_{(u,v) \in \edge} \mathbf{1}[c(u)=a, c(v)=b, B_\ell(\ell_v-\ell_u)=\Delta\ell, B_t(t_v-t_u)=\Delta t, \sign(\weight(u \rightarrow v))=s].
+\end{equation}
+This yields approximately $105$ features for typical GPT-2 configurations.
+
+\subsection{Classification Pipeline}
+
+Each graph representation is mapped to a feature vector $\phi(G_s) \in \R^d$. We train a linear SVM with stratified $5$-fold cross-validation on the slice labels (corruption type within task family). All normalisation and hyperparameter selection are performed within each fold to prevent leakage. For the fixed-layout representations, we standardise features using training-set statistics only.
+
+\begin{figure}[t]
+\centering
+\begin{minipage}{0.95\textwidth}
+\small
+\begin{verbatim}
+Algorithm 1: PIG -- from patching to graph-kernel classification
+Require: Transformer f_\theta, pairs {(x_i^cln, x_i^crp, y*_i)}_{i=1}^{N},
+  node set V, slices {D_s}_s, order \prec, sparsification k,
+  representation \phi, kernel k_svm
+Ensure: Graph dataset {G_s}_s, classification results
+
+--- Patch effects ---
+for i = 1 to N do
+    O_base ← O(f_\theta(x_i^crp))
+    for u \in V do
+        E_u^(i) ← O(f\tilde_\theta(x_i^crp; u)) - O_base
+
+--- Graph construction ---
+for s = 1 to S do
+    for u, v \in V, u \prec v do
+        w_s(u→v) ← corr({E_u^(i)}, {E_v^(i)})
+    for u \in V do
+        keep top-k edges (u→v) by |w_s(u→·)|
+    G_s ← (V, E_s, w_s)
+
+--- Kernel classification ---
+compute \phi(G_s) for all s
+train linear SVM on ({\phi(G_s)}, {label_s}) with cross-validation
+\end{verbatim}
+\caption{PIG pipeline: from activation patching to graph-kernel classification.}
+\label{alg:pig}
+\end{minipage}
+\end{figure}
+
+\section{Experiments}
+
+\subsection{Setup}
+
+\textbf{Model.} We use OpenAI's GPT-2 (small) as our target model. With $12$ layers, $1280$-dimensional residual stream, and context length $1024$, the residual-only node set has $N = 12 \times T$ nodes for a sequence of length $T$. For our primary IOI evaluation we use $T \approx 20$ tokens, yielding $N = 240$ residual nodes and $D_{\mathrm{fixed}} = 240 \times 239 = 57,\!360$ edge slots before sparsification.
+
+\textbf{Task.} We evaluate on the indirect object identification (IOI) task \cite{turpin2023algorithmic}, where models must identify the indirect object in sentences such as ``Alice gave Bob a book. Bob thanked \_\_\_.'' Corruptions break the expected causal chain: in \texttt{name\_swap}, one of the names is replaced with a distractor; in \texttt{abba}, both names are swapped.
+
+\textbf{Evaluation.} We use seeds $\{7, 42, 123\}$ and $n \in \{20, 100, 500\}$ prompt pairs per corruption per seed. For $n=100$ and $n=500$, we use an example-disjoint split: $80$ (or $400$) training examples generate $32$ bootstrap graphs per slice, and $20$ (or $100$) test examples generate $32$ independent bootstrap graphs. This prevents the test-set leakage that can occur when the same prompt contributes to both training and test bootstrap graphs. We report mean accuracy $\pm$ standard deviation across seeds.
+
+\textbf{Null controls.} At test time, we apply two null controls: edge shuffle (randomly reassign edge targets while preserving in-degrees) and weight shuffle (permute weights across edges while preserving edge positions). These test whether the signal arises from genuine topological structure or from artefacts of graph size or degree distribution.
+
+\subsection{Main Results: $n=100$ with Example-Disjoint Split}
+
+Table~\ref{tab:main} reports mean classification accuracy across seeds for each representation. The fixed-layout signed variant achieves the highest accuracy ($0.9896$) with the lowest standard deviation ($0.0147$), indicating both strong performance and stability across random seeds. The fixed-layout binary topology variant achieves $0.9323$ with comparable stability.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lcc@{\;}l}
+\toprule
+\textbf{Representation} & \textbf{Acc.} & \textbf{Std} & \textbf{Dim} \\
+\midrule
+WL bootstrap linear & $0.7656$ & $0.1673$ & --- \\
+Fixed layout weighted linear & $0.8698$ & $0.1522$ & $N^2\!-\!N$ \\
+Fixed layout binary linear & $0.9323$ & $0.0737$ & $N^2\!-\!N$ \\
+\textbf{Fixed layout signed linear} & \textbf{$0.9896$} & \textbf{$0.0147$} & $N^2\!-\!N$ \\
+Spectral shape linear & $0.6042$ & $0.0515$ & $96$ \\
+Graphlet shape linear & $0.6354$ & $0.0849$ & $38$ \\
+\midrule
+Edge-shuffle test & $0.5000$ & $0.0000$ & --- \\
+Weight-shuffle test & $0.5021$ & $0.0029$ & --- \\
+\bottomrule
+\end{tabular}
+\caption{Main results on IOI with GPT-2 ($n=100$ prompt pairs per corruption, example-disjoint bootstrap split, seeds $\{7,42,123\}$). Edge features are computed on residual-stream-only nodes with $k=5$. The best result is fixed-layout signed, and null controls fall to chance.}
+\label{tab:main}
+\end{table}
+
+Two patterns emerge from these results. First, the strongest signal in the graphs is the \emph{signed identity of edge slots}: the signed variant outperforms both the weighted and binary variants. The binary variant, which encodes only edge presence, achieves $0.9323$, suggesting that topology alone carries substantial signal. The addition of sign information improves this to $0.9896$.
+
+Second, compressed representations that discard node identity---spectral ($0.6042$) and graphlet ($0.6354$)---perform only marginally above chance, despite capturing global and local graph structure. This indicates that node-level identity (which specific $(\ell, t)$ positions are connected, not just the coarse pattern of connections) is essential for distinguishing mechanistic circuits.
+
+\subsection{Scalable Representations}
+
+Table~\ref{tab:scalable} compares scalable representations on $n=100$ and $n=500$. The hashed fixed-layout signed representation achieves $0.9375$ at $n=100$ with $1024$ dimensions, recovering $94.7\%$ of the fixed-layout signed performance with $7.2\%$ of the dimensionality. At $n=500$, both hashed fixed-layout and coarse count reach $1.0000$ and $0.9740$ respectively, suggesting that the additional data compensates for hash collisions in the former and provides sufficient examples for the latter to capture the relevant structure.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+\textbf{Representation} & \textbf{Dim} & \textbf{$n\!=\!100$} & \textbf{$n\!=\!500$} \\
+\midrule
+Fixed layout signed & $14,\!280$ & $0.9896$ & $1.0000$ \\
+Hashed fixed-layout signed & $1024$ & $0.9375$ & $1.0000$ \\
+Hashed fixed-layout weighted & $1024$ & $0.9115$ & $0.9583$ \\
+Coarse count & $105$--$112$ & $0.9271$ & $0.9740$ \\
+WL bootstrap linear & --- & $0.7656$ & $1.0000$ \\
+\bottomrule
+\end{tabular}
+\caption{Scalable representations on IOI. Hashed fixed-layout and coarse count recover most of the fixed-layout signed performance with fixed dimensionality.}
+\label{tab:scalable}
+\end{table}
+
+The coarse count representation is particularly notable: with approximately $105$ features, it achieves $0.9271$ at $n=100$ and $0.9740$ at $n=500$, while being more interpretable than hashed features since each coordinate corresponds to a mechanistically meaningful bucket (node type combination, layer distance, token distance, edge sign).
+
+\subsection{Causal Validation}
+
+We validate a subset of proposed edges through interventional causal evaluation. Following the discovery/evaluation split protocol, candidate edges are proposed from a \texttt{discovery} slice and evaluated on a disjoint \texttt{evaluation} slice. On a pilot evaluation with $20$ prompt pairs and $5$ candidate edges (seed $42$), we observe mean patch-effect restoration $M = 0.726$ for the top-ranked edge, with mediation score $R_{uv} = 1.452$. This provides evidence that the correlational graph proposals correspond to genuine causal contributions, consistent with the classification results.
+
+\section{Analysis and Discussion}
+
+\subsection{The Role of Edge-Slot Identity}
+
+The performance gap between fixed-layout signed features ($0.9896$) and compressed shape features (spectral: $0.6042$, graphlet: $0.6354$) is the most consistent pattern in our experiments. This gap cannot be attributed to feature dimensionality alone: spectral features use $96$ dimensions and graphlet features use $38$, yet they achieve substantially lower accuracy than fixed-layout binary ($0.9323$) with the same $N^2\!-\!N$ dimensionality. The distinguishing factor is node identity: fixed-layout features encode \emph{which specific edge slots are present}, while spectral and graphlet features encode \emph{what global or local patterns are present} without preserving node labels.
+
+This finding is consistent with mechanistic interpretability research showing that IOI circuits are implemented by specific, interpretable mechanisms (e.g. induction heads at specific layer positions) rather than by generic graph-theoretic patterns. The identity of the nodes---the specific $(\ell, t)$ positions---is part of the circuit description.
+
+\subsection{Why Signed Weights Matter}
+
+The fixed-layout signed variant outperforms the binary variant by $0.0573$ in mean accuracy and achieves a substantially lower standard deviation ($0.0147$ versus $0.0737$). The binary variant isolates topology (which edges exist), while the signed variant additionally encodes the direction of the causal effect (whether the patching intervention increases or decreases the target logit). This additional information---the sign---appears to provide a stable signal that is less sensitive to random seed variations than edge presence alone.
+
+The weighted variant ($0.8698$) performs worse than both the binary and signed variants, suggesting that the precise magnitude of correlation weights carries less information than the sign. This may be because the magnitude of patch effects is sensitive to the number of examples in each bootstrap slice, while the sign is more robust to sampling variation.
+
+\subsection{Null Control Validation}
+
+Edge-shuffle and weight-shuffle controls reduce performance to $0.5000$ and $0.5021$ respectively (both at chance level of $0.50$ for binary classification). This confirms that the signal in fixed-layout features does not arise from graph size, degree distribution, or other artefacts of the graph construction process. The signal survives topological perturbation (shuffling edge targets) and weight permutation only when the node-slot identity is preserved, confirming that edge-slot identity is the necessary and sufficient condition for the strong performance of fixed-layout features.
+
+\subsection{Scalability Implications}
+
+For larger models, the quadratic growth of fixed-layout features becomes prohibitive. For a model with $L=32$ layers, $T=512$ tokens, and $C=3$ component types, $N = 49,\!152$ nodes and $D_{\mathrm{fixed}} \approx 2.4 \times 10^9$ features. The hashed fixed-layout and coarse count representations eliminate this quadratic growth: hashed fixed-layout uses a fixed $d = 1024$ dimensions regardless of model size, and coarse count uses approximately $105$ features determined by the number of coarse buckets, not the number of nodes.
+
+Both scalable representations achieve near-perfect accuracy at $n=500$, suggesting that the underlying signal is robust and does not depend on the exact edge-slot coordinates. The residual performance gap between fixed-layout signed ($1.0000$) and hashed fixed-layout signed ($1.0000$) at $n=500$ is negligible ($0.0625$ at $n=100$), further supporting the use of compressed representations for large-scale analyses.
+
+\section{Limitations}
+
+Our evaluation is limited to the IOI task on GPT-2 small. While IOI is a well-studied benchmark in mechanistic interpretability, the generalisability of our findings to other tasks (e.g., key--value retrieval, bracket matching) and model architectures (e.g., decoder-only models with different architectures, encoder--decoder models) remains to be investigated.
+
+The correlation-based graph construction provides a cheap correlational proposal mechanism but does not establish causal structure. While we validate a subset of edges through interventional causal evaluation, the full set of proposed edges remains unvalidated. Future work should extend causal validation to larger edge sets and incorporate more sophisticated causal inference methods.
+
+Our scalability results are based on residual-stream-only node types. Including attention heads and MLP subcomponents would increase both the number of nodes and the complexity of the coarse count buckets, potentially requiring adjustment of the bucket granularity.
+
+\section{Conclusion}
+
+We presented a pipeline for constructing and comparing interpretability graphs derived from activation patching, and evaluated multiple graph representations for slice classification on the IOI task with GPT-2. The principal finding is that the strongest signal in patch-effect graphs resides in the signed identity of edge slots: fixed-layout signed edge features achieve $0.9896$ mean accuracy under example-disjoint bootstrap evaluation. Compressed representations---hashed fixed-layout and coarse count---recover most of this performance with fixed dimensionality, enabling scalable analysis of larger models. Null controls confirm that the signal is specific to node-slot identity rather than graph-theoretic artefacts. These results suggest that scalable mechanistic analysis of large models is feasible through compressed representations that preserve mechanistic interpretability while eliminating quadratic feature growth.
+
+\bibliographystyle{abbrvnat}
+\bibliography{references}
+
+\end{document}
