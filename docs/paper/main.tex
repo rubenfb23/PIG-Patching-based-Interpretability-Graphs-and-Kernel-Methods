@@ -11,12 +11,15 @@
 \usepackage{algorithm}
 \usepackage{algpseudocode}
 \usepackage{hyperref}
+\hypersetup{hidelinks}
 \usepackage{natbib}
 \usepackage{xcolor}
 \usepackage{siunitx}
 \usepackage{url}
-% \usepackage{microtype}
-\usepackagefvextra
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage[protrusion=true,expansion=false]{microtype}
+\usepackage{fvextra}
+\emergencystretch=2em
 
 \newtheorem{definition}{Definition}
 \newtheorem{lemma}[definition]{Lemma}
@@ -38,9 +41,9 @@
 \newcommand{\latent}{a}
 \newcommand{\target}{y^\star}
 \newcommand{\slicedata}{D_s}
-\newcommand{\fixlayout}{\phi_{\mathrm{fixed}}}
-\newcommand{\fixhashed}{\phi_{\mathrm{hashed}}}
-\newcommand{\fixcoarse}{\phi_{\mathrm{coarse}}}
+\newcommand{\fixlayout}{\mathop{\phi_{\mathrm{fixed}}}\nolimits}
+\newcommand{\fixhashed}{\mathop{\phi_{\mathrm{hashed}}}\nolimits}
+\newcommand{\fixcoarse}{\mathop{\phi_{\mathrm{coarse}}}\nolimits}
 \newcommand{\wl}{\phi_{\mathrm{WL}}}
 \newcommand{\spec}{\phi_{\mathrm{spec}}}
 \newcommand{\gl}{\phi_{\mathrm{graphlet}}}
@@ -146,7 +149,15 @@ With $d = 1024$, this eliminates quadratic growth at the cost of hash collisions
 
 \textbf{Coarse count.} We aggregate edges by coarse type: node component type, layer-difference bucket, token-difference bucket, and edge sign:
 \begin{equation}
-\fixcoarse_{a,b,\Delta\ell,\Delta t,s}(G) = \sum_{(u,v) \in \edge} \mathbf{1}[c(u)=a, c(v)=b, B_\ell(\ell_v-\ell_u)=\Delta\ell, B_t(t_v-t_u)=\Delta t, \sign(\weight(u \rightarrow v))=s].
+\begin{aligned}
+\fixcoarse_{a,b,\Delta\ell,\Delta t,s}(G)
+&= \sum_{(u,v) \in \edge}
+\mathbf{1}\big[
+c(u)=a,\ c(v)=b,\ B_\ell(\ell_v-\ell_u)=\Delta\ell,\\
+&\qquad\qquad
+B_t(t_v-t_u)=\Delta t,\ \sign(\weight(u \rightarrow v))=s
+\big].
+\end{aligned}
 \end{equation}
 This yields approximately $105$ features for typical GPT-2 configurations.
 
@@ -158,7 +169,7 @@ Each graph representation is mapped to a feature vector $\phi(G_s) \in \R^d$. We
 \centering
 \begin{minipage}{0.95\textwidth}
 \small
-\begin{verbatim}
+\begin{Verbatim}[fontsize=\footnotesize,breaklines=true,breakanywhere=true]
 Algorithm 1: PIG -- from patching to graph-kernel classification
 Require: Transformer f_\theta, pairs {(x_i^cln, x_i^crp, y*_i)}_{i=1}^{N},
   node set V, slices {D_s}_s, order \prec, sparsification k,
@@ -182,7 +193,7 @@ for s = 1 to S do
 --- Kernel classification ---
 compute \phi(G_s) for all s
 train linear SVM on ({\phi(G_s)}, {label_s}) with cross-validation
-\end{verbatim}
+\end{Verbatim}
 \caption{PIG pipeline: from activation patching to graph-kernel classification.}
 \label{alg:pig}
 \end{minipage}
@@ -200,7 +211,7 @@ train linear SVM on ({\phi(G_s)}, {label_s}) with cross-validation
 
 \textbf{Null controls.} At test time, we apply two null controls: edge shuffle (randomly reassign edge targets while preserving in-degrees) and weight shuffle (permute weights across edges while preserving edge positions). These test whether the signal arises from genuine topological structure or from artefacts of graph size or degree distribution.
 
-\subsection{Main Results: $n=100$ with Example-Disjoint Split}
+\subsection{Main Results: \texorpdfstring{$n=100$}{n=100} with Example-Disjoint Split}
 
 Table~\ref{tab:main} reports mean classification accuracy across seeds for each representation. The fixed-layout signed variant achieves the highest accuracy ($0.9896$) with the lowest standard deviation ($0.0147$), indicating both strong performance and stability across random seeds. The fixed-layout binary topology variant achieves $0.9323$ with comparable stability.
 
