@@ -12,7 +12,7 @@
 \usepackage{algpseudocode}
 \usepackage{hyperref}
 \hypersetup{hidelinks}
-\usepackage{natbib}
+\usepackage[numbers,sort&compress]{natbib}
 \usepackage{xcolor}
 \usepackage{siunitx}
 \usepackage{url}
@@ -20,6 +20,9 @@
 \usepackage[protrusion=true,expansion=false]{microtype}
 \usepackage{fvextra}
 \emergencystretch=2em
+\Urlmuskip=0mu plus 1mu
+\setlength{\bibsep}{2pt plus 0.3ex}
+\renewcommand{\bibfont}{\small}
 
 \newtheorem{definition}{Definition}
 \newtheorem{lemma}[definition]{Lemma}
@@ -61,13 +64,13 @@ Mechanistic interpretability seeks to identify the internal algorithms implement
 
 \section{Introduction}
 
-Large language models implement complex computations distributed across layers, tokens, attention heads, and MLP sublayers. Mechanistic interpretability aims to reverse-engineer these internal algorithms in terms of interpretable circuit components \cite{elhage2021transformer}. Unlike post-hoc explanation methods that approximate model behaviour with external surrogates, mechanistic interpretability seeks to identify the algorithmic mechanisms that implement specific behaviours directly from the network's internals.
+Large language models based on transformer architectures \cite{vaswani2017attention,radford2019language} implement complex computations distributed across layers, tokens, attention heads, and MLP sublayers. Mechanistic interpretability aims to reverse-engineer these internal algorithms in terms of interpretable circuit components \cite{elhage2021transformer}. Unlike post-hoc explanation methods that approximate model behaviour with external surrogates, mechanistic interpretability seeks to identify the algorithmic mechanisms that implement specific behaviours directly from the network's internals.
 
 Activation patching \cite{narang2022causal, wang2023localizing} provides a controlled intervention mechanism for causal discovery within neural networks. Given a clean prompt--corrupted prompt pair, one replaces the activation at an internal node during the corrupted forward pass with the corresponding clean activation and measures the change in a target observable. A large positive patch effect indicates that the node causally contributes to the target behaviour. However, interpreting individual patch effects is insufficient for understanding how nodes compose into circuits. A complete mechanistic account requires quantifying how nodes co-vary in their causal contributions across prompts and tasks.
 
-This paper presents patching-based interpretability graphs (PIG), a pipeline that converts activation patching signals into a dataset of sparse directed graphs and compares these graphs using classical kernel methods. Each graph is constructed from a slice of prompt pairs (a task family and corruption type), with nodes corresponding to internal transformer positions and edges encoding the co-variation of patch-effect profiles. The resulting graph dataset provides a structured, comparable representation of mechanistic circuits that can be analysed with established graph-learning methods.
+This paper presents patching-based interpretability graphs (PIG), a pipeline that converts activation patching signals into a dataset of sparse directed graphs and compares these graphs using classical kernel methods \cite{shervashidze2011weisfeiler,morris2019weisfeiler}. Each graph is constructed from a slice of prompt pairs (a task family and corruption type), with nodes corresponding to internal transformer positions and edges encoding the co-variation of patch-effect profiles. The resulting graph dataset provides a structured, comparable representation of mechanistic circuits that can be analysed with established graph-learning methods.
 
-Our contributions are threefold. First, we formalise the construction of interpretability graphs from patch effects, specifying the node set, edge construction via patch-effect correlation, and top-$k$ sparsification. Second, we conduct an exploratory comparative evaluation of graph representations for slice classification on the indirect object identification (IOI) task with GPT-2: Weisfeiler--Lehman subtree features, fixed-layout edge features (weighted, binary, and signed), spectral shape descriptors, and graphlet motif counts. Third, we address scalability by proposing compressed representations---hashed fixed-layout and coarse feature-bucket encodings---that preserve most of the fixed-layout signal while eliminating quadratic feature growth. We validate our correlational proposals through interventional causal evaluation on a subset of candidate edges.
+Our contributions are threefold. First, we formalise the construction of interpretability graphs from patch effects, specifying the node set, edge construction via patch-effect correlation, and top-$k$ sparsification. Second, we conduct an exploratory comparative evaluation of graph representations for slice classification on the indirect object identification (IOI) task with GPT-2: Weisfeiler--Lehman subtree features \cite{shervashidze2011weisfeiler}, fixed-layout edge features (weighted, binary, and signed), spectral shape descriptors, and graphlet motif counts. Third, we address scalability by proposing compressed representations---hashed fixed-layout and coarse feature-bucket encodings---that preserve most of the fixed-layout signal while eliminating quadratic feature growth. We validate our correlational proposals through interventional causal evaluation on a subset of candidate edges.
 
 The strongest signal in our experiments resides in the signed identity of edge slots: fixed-layout signed edge features achieve $0.9896$ mean accuracy across seeds under example-disjoint bootstrap evaluation. However, these features require $N(N-1)$ coordinates for $N$ nodes, which is $14,\!280$ dimensions for GPT-2 with residual-stream-only nodes. A stable hash aggregation into $1024$ dimensions reduces this to $0.9375$, while a coarse bucket representation with approximately $105$ features achieves $0.9271$. Spectral and graphlet representations, which discard node identity in favour of global and local shape statistics, remain near chance, suggesting that node-level identity---not just graph topology---is essential for distinguishing mechanistic circuits.
 
@@ -85,7 +88,7 @@ The strongest signal in our experiments resides in the signed identity of edge s
 
 \subsection{Formal Setup}
 
-Let $f_\theta: \mathcal{X} \rightarrow \R^{|V|}$ be a transformer model with parameters $\theta$, vocabulary $V$, and logit output. For a prompt $x = (x_1, \dots, x_T)$, we write $\ell(x) \in \R^{|V|}$ for the final logit vector. We choose the observable $O(x) = \ell_{\target}(x)$, the logit of the target token at a specified position.
+Let $f_\theta: \mathcal{X} \rightarrow \R^{|V|}$ be a transformer model \cite{vaswani2017attention} with parameters $\theta$, vocabulary $V$, and logit output. For a prompt $x = (x_1, \dots, x_T)$, we write $\ell(x) \in \R^{|V|}$ for the final logit vector. We choose the observable $O(x) = \ell_{\target}(x)$, the logit of the target token at a specified position.
 
 \textbf{Node set.} We define a fixed node set $\node$ as a disjoint union of component types:
 \begin{equation}
@@ -141,7 +144,7 @@ The dimension is $D_{\mathrm{fixed}} = N(N-1)$, which grows quadratically with $
 
 \textbf{Graphlet features.} We count occurrences of unweighted subgraph motifs of size $3$: empty triplets, single-edge triplets, two-edge triplets, and triangles. Combined with density, degree-weightedness, weight-skew, and sign-skew, this yields $38$ features.
 
-\textbf{Hashed fixed-layout.} We map each edge slot to a fixed coordinate $j = h(u, v) \bmod d$ using a stable hash function, and accumulate the signed weight:
+\textbf{Hashed fixed-layout.} We map each edge slot to a fixed coordinate $j = h(u, v) \bmod d$ using a stable hash function, following the feature-hashing principle \cite{weinberger2009feature}, and accumulate the signed weight:
 \begin{equation}
 \fixhashed_j(G) \mathrel{+}= \sign(\weight(u \rightarrow v)).
 \end{equation}
@@ -163,7 +166,7 @@ This yields approximately $105$ features for typical GPT-2 configurations.
 
 \subsection{Classification Pipeline}
 
-Each graph representation is mapped to a feature vector $\phi(G_s) \in \R^d$. We train a linear SVM with stratified $5$-fold cross-validation on the slice labels (corruption type within task family). All normalisation and hyperparameter selection are performed within each fold to prevent leakage. For the fixed-layout representations, we standardise features using training-set statistics only.
+Each graph representation is mapped to a feature vector $\phi(G_s) \in \R^d$. We train a linear SVM \cite{cortes1995support} with stratified $5$-fold cross-validation on the slice labels (corruption type within task family). All normalisation and hyperparameter selection are performed within each fold to prevent leakage. For the fixed-layout representations, we standardise features using training-set statistics only.
 
 \begin{figure}[t]
 \centering
@@ -203,7 +206,7 @@ train linear SVM on ({\phi(G_s)}, {label_s}) with cross-validation
 
 \subsection{Setup}
 
-\textbf{Model.} We use OpenAI's GPT-2 (small) as our target model. With $12$ layers, $1280$-dimensional residual stream, and context length $1024$, the residual-only node set has $N = 12 \times T$ nodes for a sequence of length $T$. For our primary IOI evaluation we use $T \approx 20$ tokens, yielding $N = 240$ residual nodes and $D_{\mathrm{fixed}} = 240 \times 239 = 57,\!360$ edge slots before sparsification.
+\textbf{Model.} We use OpenAI's GPT-2 (small) \cite{radford2019language} as our target model. With $12$ layers, $1280$-dimensional residual stream, and context length $1024$, the residual-only node set has $N = 12 \times T$ nodes for a sequence of length $T$. For our primary IOI evaluation we use $T \approx 20$ tokens, yielding $N = 240$ residual nodes and $D_{\mathrm{fixed}} = 240 \times 239 = 57,\!360$ edge slots before sparsification.
 
 \textbf{Task.} We evaluate on the indirect object identification (IOI) task \cite{turpin2023algorithmic}, where models must identify the indirect object in sentences such as ``Alice gave Bob a book. Bob thanked \_\_\_.'' Corruptions break the expected causal chain: in \texttt{name\_swap}, one of the names is replaced with a distractor; in \texttt{abba}, both names are swapped.
 
@@ -275,7 +278,7 @@ We validate a subset of proposed edges through interventional causal evaluation.
 
 The performance gap between fixed-layout signed features ($0.9896$) and compressed shape features (spectral: $0.6042$, graphlet: $0.6354$) is the most consistent pattern in our experiments. This gap cannot be attributed to feature dimensionality alone: spectral features use $96$ dimensions and graphlet features use $38$, yet they achieve substantially lower accuracy than fixed-layout binary ($0.9323$) with the same $N^2\!-\!N$ dimensionality. The distinguishing factor is node identity: fixed-layout features encode \emph{which specific edge slots are present}, while spectral and graphlet features encode \emph{what global or local patterns are present} without preserving node labels.
 
-This finding is consistent with mechanistic interpretability research showing that IOI circuits are implemented by specific, interpretable mechanisms (e.g. induction heads at specific layer positions) rather than by generic graph-theoretic patterns. The identity of the nodes---the specific $(\ell, t)$ positions---is part of the circuit description.
+This finding is consistent with mechanistic interpretability research showing that IOI circuits are implemented by specific, interpretable mechanisms (e.g. induction heads at specific layer positions) rather than by generic graph-theoretic patterns \cite{wang2023localizing,nanda2023attribution,turpin2023algorithmic}. The identity of the nodes---the specific $(\ell, t)$ positions---is part of the circuit description.
 
 \subsection{Why Signed Weights Matter}
 
@@ -295,7 +298,7 @@ Both scalable representations achieve near-perfect accuracy at $n=500$, suggesti
 
 \section{Limitations}
 
-Our evaluation is limited to the IOI task on GPT-2 small. While IOI is a well-studied benchmark in mechanistic interpretability, the generalisability of our findings to other tasks (e.g., key--value retrieval, bracket matching) and model architectures (e.g., decoder-only models with different architectures, encoder--decoder models) remains to be investigated.
+Our evaluation is limited to the IOI task on GPT-2 small. While IOI is a well-studied benchmark in mechanistic interpretability \cite{wang2023localizing,nanda2023attribution}, the generalisability of our findings to other tasks (e.g., key--value retrieval, bracket matching) and model architectures (e.g., decoder-only models with different architectures, encoder--decoder models) remains to be investigated.
 
 The correlation-based graph construction provides a cheap correlational proposal mechanism but does not establish causal structure. While we validate a subset of edges through interventional causal evaluation, the full set of proposed edges remains unvalidated. Future work should extend causal validation to larger edge sets and incorporate more sophisticated causal inference methods.
 
@@ -305,7 +308,7 @@ Our scalability results are based on residual-stream-only node types. Including 
 
 We presented a pipeline for constructing and comparing interpretability graphs derived from activation patching, and evaluated multiple graph representations for slice classification on the IOI task with GPT-2. The principal finding is that the strongest signal in patch-effect graphs resides in the signed identity of edge slots: fixed-layout signed edge features achieve $0.9896$ mean accuracy under example-disjoint bootstrap evaluation. Compressed representations---hashed fixed-layout and coarse count---recover most of this performance with fixed dimensionality, enabling scalable analysis of larger models. Null controls confirm that the signal is specific to node-slot identity rather than graph-theoretic artefacts. These results suggest that scalable mechanistic analysis of large models is feasible through compressed representations that preserve mechanistic interpretability while eliminating quadratic feature growth.
 
-\bibliographystyle{abbrvnat}
+\bibliographystyle{unsrtnat}
 \bibliography{references}
 
 \end{document}
