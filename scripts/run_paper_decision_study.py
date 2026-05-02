@@ -20,7 +20,7 @@ from typing import Iterable, Sequence
 
 import numpy as np
 from scipy.sparse import csr_matrix, diags, eye
-from scipy.sparse.linalg import ArpackNoConvergence, eigsh
+from scipy.sparse.linalg import ArpackError, ArpackNoConvergence, eigsh
 from sklearn.metrics import accuracy_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
@@ -174,6 +174,73 @@ def _build_bootstrap_graphs(
 def _node_key(node: Node) -> str:
     head = "none" if node.head is None else str(node.head)
     return f"L{node.layer}:T{node.token}:{node.node_type}:H{head}"
+
+
+def _tensor_node_key(tensor, layer_idx: int, token_idx: int, comp_idx: int) -> str:
+    comp = tensor.component_axis[comp_idx]
+    head = "none" if comp.head is None else str(comp.head)
+    return f"L{layer_idx}:T{token_idx}:{comp.node_type}:H{head}"
+
+
+def _patch_effect_matrix(
+    tensors: Sequence,
+    *,
+    feature_names: list[str] | None = None,
+) -> MatrixBundle:
+    tensor_list = list(tensors)
+    labels = [tensor.prompt_pair.slice_label for tensor in tensor_list]
+    if feature_names is None:
+        max_dim = max(int(tensor.effects.size) for tensor in tensor_list)
+        feature_names = [f"effect_{idx}" for idx in range(max_dim)]
+
+    matrix = np.zeros((len(tensor_list), len(feature_names)), dtype=np.float32)
+    for row_idx, tensor in enumerate(tensor_list):
+        flat = np.asarray(tensor.effects, dtype=np.float32).reshape(-1)
+        count = min(len(feature_names), flat.size)
+        if count:
+            matrix[row_idx, :count] = flat[:count]
+    return MatrixBundle(X=matrix, y=labels, feature_names=feature_names)
+
+
+def _topk_node_vocabulary(tensors: Sequence, *, k: int) -> list[str]:
+    scores: dict[str, float] = {}
+    for tensor in tensors:
+        for layer_idx in range(tensor.num_layers):
+            for token_idx in range(tensor.num_tokens):
+                for comp_idx in range(tensor.num_components):
+                    key = _tensor_node_key(tensor, layer_idx, token_idx, comp_idx)
+                    score = float(abs(tensor.effects[layer_idx, token_idx, comp_idx]))
+                    scores[key] = max(scores.get(key, 0.0), score)
+    return [
+        key
+        for key, _ in sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:k]
+    ]
+
+
+def _topk_node_matrix(
+    tensors: Sequence,
+    *,
+    k: int,
+    feature_names: list[str] | None = None,
+) -> MatrixBundle:
+    tensor_list = list(tensors)
+    labels = [tensor.prompt_pair.slice_label for tensor in tensor_list]
+    if feature_names is None:
+        feature_names = _topk_node_vocabulary(tensor_list, k=k)
+    feature_index = {name: idx for idx, name in enumerate(feature_names)}
+    matrix = np.zeros((len(tensor_list), len(feature_names)), dtype=np.float32)
+
+    for row_idx, tensor in enumerate(tensor_list):
+        for layer_idx in range(tensor.num_layers):
+            for token_idx in range(tensor.num_tokens):
+                for comp_idx in range(tensor.num_components):
+                    key = _tensor_node_key(tensor, layer_idx, token_idx, comp_idx)
+                    col_idx = feature_index.get(key)
+                    if col_idx is not None:
+                        matrix[row_idx, col_idx] = np.float32(
+                            tensor.effects[layer_idx, token_idx, comp_idx]
+                        )
+    return MatrixBundle(X=matrix, y=labels, feature_names=feature_names)
 
 
 def _edge_key(src: Node, dst: Node) -> str:
@@ -453,6 +520,9 @@ def _extreme_eigenpairs(
             else:
                 dense = matrix.toarray()
                 values, vectors = np.linalg.eigh(dense)
+        except ArpackError:
+            dense = matrix.toarray()
+            values, vectors = np.linalg.eigh(dense)
 
     order = np.argsort(values)
     if which in {"LA", "LM"}:
@@ -730,6 +800,7 @@ def _evaluate_seed(
     wl_depth: int,
     spectral_values: int,
     hashed_dim: int,
+    topk_nodes: int,
     gnn_config: GNNTrainingConfig,
     null_repeats: int,
 ) -> dict:
@@ -762,6 +833,30 @@ def _evaluate_seed(
         "num_train_graphs": len(train_graphs),
         "num_test_graphs": len(test_graphs),
         "metrics": {},
+    }
+
+    train_tensors = list(train_dataset)
+    test_tensors = list(test_dataset)
+
+    patch_train = _patch_effect_matrix(train_tensors)
+    patch_test = _patch_effect_matrix(
+        test_tensors,
+        feature_names=patch_train.feature_names,
+    )
+    result["metrics"]["patch_effect_node_vector"] = {
+        kernel: _fit_eval_svm(patch_train, patch_test, kernel=kernel, seed=seed)
+        for kernel in ("linear", "rbf")
+    }
+
+    topk_train = _topk_node_matrix(train_tensors, k=topk_nodes)
+    topk_test = _topk_node_matrix(
+        test_tensors,
+        k=topk_nodes,
+        feature_names=topk_train.feature_names,
+    )
+    result["metrics"]["topk_node_identity"] = {
+        kernel: _fit_eval_svm(topk_train, topk_test, kernel=kernel, seed=seed)
+        for kernel in ("linear", "rbf")
     }
 
     wl_train = _wl_matrix(train_graphs, depth=wl_depth)
@@ -877,6 +972,10 @@ def _write_summary(path: Path, rows: list[dict]) -> None:
         "spectral_rbf",
         "graphlet_linear",
         "graphlet_rbf",
+        "patch_effect_linear",
+        "patch_effect_rbf",
+        "topk_node_linear",
+        "topk_node_rbf",
         "hashed_sign_linear",
         "hashed_sign_rbf",
         "hashed_weighted_linear",
@@ -914,6 +1013,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wl-depth", type=int, default=3)
     parser.add_argument("--spectral-values", type=int, default=16)
     parser.add_argument("--hashed-dim", type=int, default=1024)
+    parser.add_argument("--topk-nodes", type=int, default=10)
     parser.add_argument("--gnn-device", default="cpu")
     parser.add_argument("--gnn-hidden-dim", type=int, default=32)
     parser.add_argument("--gnn-layers", type=int, default=2)
@@ -1001,6 +1101,7 @@ def main() -> None:
                         wl_depth=args.wl_depth,
                         spectral_values=args.spectral_values,
                         hashed_dim=args.hashed_dim,
+                        topk_nodes=args.topk_nodes,
                         gnn_config=GNNTrainingConfig(
                             hidden_dim=args.gnn_hidden_dim,
                             num_layers=args.gnn_layers,
@@ -1023,6 +1124,7 @@ def main() -> None:
                         "corruptions": corruptions,
                         "max_tokens": max_tokens,
                         "hashed_dim": args.hashed_dim,
+                        "topk_nodes": args.topk_nodes,
                         "gnn_encoder_config": {
                             "hidden_dim": args.gnn_hidden_dim,
                             "num_layers": args.gnn_layers,
@@ -1078,6 +1180,18 @@ def main() -> None:
                                 "accuracy"
                             ],
                             "graphlet_rbf": metrics["graphlet_shape"]["rbf"][
+                                "accuracy"
+                            ],
+                            "patch_effect_linear": metrics[
+                                "patch_effect_node_vector"
+                            ]["linear"]["accuracy"],
+                            "patch_effect_rbf": metrics["patch_effect_node_vector"][
+                                "rbf"
+                            ]["accuracy"],
+                            "topk_node_linear": metrics["topk_node_identity"][
+                                "linear"
+                            ]["accuracy"],
+                            "topk_node_rbf": metrics["topk_node_identity"]["rbf"][
                                 "accuracy"
                             ],
                             "hashed_sign_linear": metrics["hashed_fixed_sign"][
