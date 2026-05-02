@@ -21,8 +21,8 @@
 \citation{gupta2023sparse}
 \citation{park2023causal}
 \citation{hanna2024circuit}
-\@writefile{toc}{\contentsline {section}{\numberline {2}Related Work}{2}{section.2}\protected@file@percent }
 \citation{vaswani2017attention}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Related Work}{2}{section.2}\protected@file@percent }
 \@writefile{toc}{\contentsline {section}{\numberline {3}Methodology}{3}{section.3}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Formal Setup}{3}{subsection.3.1}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Patch Effects}{3}{subsection.3.2}\protected@file@percent }
@@ -42,31 +42,28 @@
 \@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Main Results: $n=100$ with Example-Disjoint Split}{6}{subsection.4.2}\protected@file@percent }
 \@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Graph representation results on IOI with GPT-2 ($n=100$ prompt pairs per corruption, example-disjoint bootstrap split, seeds $\{7,42,123\}$). Edge features use residual-stream-only nodes with $k=5$. Fixed-layout signed preserves localized edge-slot information best among graph representations, while global spectral and graphlet summaries discard much of the signal.}}{7}{table.2}\protected@file@percent }
 \newlabel{tab:main}{{2}{7}{Graph representation results on IOI with GPT-2 ($n=100$ prompt pairs per corruption, example-disjoint bootstrap split, seeds $\{7,42,123\}$). Edge features use residual-stream-only nodes with $k=5$. Fixed-layout signed preserves localized edge-slot information best among graph representations, while global spectral and graphlet summaries discard much of the signal}{table.2}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Compression trade-offs, non-graph baselines, and null controls on IOI ($n=100$, seeds $\{7,42,123\}$). Raw patch-effect and top-$k$ node rows are per-example diagnostic upper bounds showing that classification signal is already present before graph construction; they are not graph-bootstrap results. Scalable graph compressions preserve much of this localized signal while reducing dimensionality. Null controls show that fixed-layout performance depends on preserving signed node/edge identities.}}{7}{table.3}\protected@file@percent }
-\newlabel{tab:baselines}{{3}{7}{Compression trade-offs, non-graph baselines, and null controls on IOI ($n=100$, seeds $\{7,42,123\}$). Raw patch-effect and top-$k$ node rows are per-example diagnostic upper bounds showing that classification signal is already present before graph construction; they are not graph-bootstrap results. Scalable graph compressions preserve much of this localized signal while reducing dimensionality. Null controls show that fixed-layout performance depends on preserving signed node/edge identities}{table.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Compression trade-offs and strict null controls on IOI ($n=100$, seeds $\{7,42,123\}$). Scalable graph compressions preserve much of the fixed-layout signed signal while reducing dimensionality. Test-time null controls show that fixed-layout weighted performance falls to chance when edge positions or weight assignments are destroyed.}}{7}{table.3}\protected@file@percent }
+\newlabel{tab:baselines}{{3}{7}{Compression trade-offs and strict null controls on IOI ($n=100$, seeds $\{7,42,123\}$). Scalable graph compressions preserve much of the fixed-layout signed signal while reducing dimensionality. Test-time null controls show that fixed-layout weighted performance falls to chance when edge positions or weight assignments are destroyed}{table.3}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Scalable Representations}{7}{subsection.4.3}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Scalable graph representations on IOI. Hashed fixed-layout and coarse count recover most of the fixed-layout signed performance with dimensionality independent of the number of possible edge slots.}}{8}{table.4}\protected@file@percent }
-\newlabel{tab:scalable}{{4}{8}{Scalable graph representations on IOI. Hashed fixed-layout and coarse count recover most of the fixed-layout signed performance with dimensionality independent of the number of possible edge slots}{table.4}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {4.4}Pilot Causal Check}{8}{subsection.4.4}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces Pilot causal check: proposed vs random vs low-ranked edges ($20$ edges, $20$ prompt pairs, seed $42$). Top-ranked edges show higher influence ($I$) and mediation ($M$) scores than random or low-ranked edges, consistent with the correlational proposals from the graph construction. These results are from a single seed and should be interpreted as preliminary. The $I$ metric measures direct activation-level influence; the $M$ metric measures output-level mediation.}}{8}{table.5}\protected@file@percent }
-\newlabel{tab:causal_validation}{{5}{8}{Pilot causal check: proposed vs random vs low-ranked edges ($20$ edges, $20$ prompt pairs, seed $42$). Top-ranked edges show higher influence ($I$) and mediation ($M$) scores than random or low-ranked edges, consistent with the correlational proposals from the graph construction. These results are from a single seed and should be interpreted as preliminary. The $I$ metric measures direct activation-level influence; the $M$ metric measures output-level mediation}{table.5}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Scalable graph representations on IOI. Hashed fixed-layout and coarse count recover most of the fixed-layout signed performance with dimensionality independent of the number of possible edge slots.}}{7}{table.4}\protected@file@percent }
+\newlabel{tab:scalable}{{4}{7}{Scalable graph representations on IOI. Hashed fixed-layout and coarse count recover most of the fixed-layout signed performance with dimensionality independent of the number of possible edge slots}{table.4}{}}
+\citation{wang2023localizing,nanda2023attribution,turpin2023algorithmic}
 \@writefile{toc}{\contentsline {section}{\numberline {5}Analysis and Discussion}{8}{section.5}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {5.1}What Classification Measures}{8}{subsection.5.1}\protected@file@percent }
-\citation{wang2023localizing,nanda2023attribution,turpin2023algorithmic}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Compression Trade-offs}{8}{subsection.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}Why Signed Graph Features Matter}{8}{subsection.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4}Null Control Validation}{8}{subsection.5.4}\protected@file@percent }
 \citation{wang2023localizing,nanda2023attribution}
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Compression Trade-offs}{9}{subsection.5.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}Why Signed Graph Features Matter}{9}{subsection.5.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.4}Null Control Validation}{9}{subsection.5.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.5}Scalability Implications}{9}{subsection.5.5}\protected@file@percent }
 \bibstyle{unsrtnat}
 \bibdata{references}
 \bibcite{vaswani2017attention}{{1}{2017}{{Vaswani et~al.}}{{Vaswani, Shazeer, Parmar, Uszkoreit, Jones, Gomez, Kaiser, and Polosukhin}}}
 \bibcite{radford2019language}{{2}{2019}{{Radford et~al.}}{{Radford, Wu, Child, Luan, Amodei, and Sutskever}}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.5}Scalability Implications}{9}{subsection.5.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6}Limitations}{9}{section.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7}Conclusion}{9}{section.7}\protected@file@percent }
 \bibcite{elhage2021transformer}{{3}{2021}{{Elhage et~al.}}{{Elhage, Nanda, Olsson, Henighan, Kaplan, Patterson, Shi, DasSarma, Zhu, Wang, DasSarma, Hernandez, Lee, and Mann}}}
 \bibcite{narang2022causal}{{4}{2022}{{Narang et~al.}}{{Narang, Brown, Shoeybi, Key, Chen, and Huang}}}
 \bibcite{wang2023localizing}{{5}{2023}{{Wang et~al.}}{{Wang, Luu, Chen, Turner, Varma, Nanda, and Olah}}}
-\@writefile{toc}{\contentsline {section}{\numberline {6}Limitations}{10}{section.6}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {7}Conclusion}{10}{section.7}\protected@file@percent }
 \bibcite{shervashidze2011weisfeiler}{{6}{2011}{{Shervashidze et~al.}}{{Shervashidze, Schweitzer, van Leeuwen, Meisen, and M{\"u}ller}}}
 \bibcite{morris2019weisfeiler}{{7}{2019}{{Morris et~al.}}{{Morris, Ritz, and Kern}}}
 \bibcite{turpin2023algorithmic}{{8}{2023}{{Turpin et~al.}}{{Turpin, Michael, Henighan, and Elhage}}}
@@ -80,4 +77,4 @@
 \bibcite{hanna2024circuit}{{16}{2024}{{Hanna et~al.}}{{Hanna, McCready, and von Werra}}}
 \bibcite{weinberger2009feature}{{17}{2009}{{Weinberger et~al.}}{{Weinberger, Dasgupta, Langford, Smola, and Attenberg}}}
 \bibcite{cortes1995support}{{18}{1995}{{Cortes and Vapnik}}{{}}}
-\gdef \@abspage@last{11}
+\gdef \@abspage@last{10}
