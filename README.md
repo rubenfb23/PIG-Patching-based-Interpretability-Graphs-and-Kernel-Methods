@@ -6,6 +6,22 @@ A Python framework for mechanistic interpretability that:
 2. Summarizes patch effects as **sparse directed graphs** (one graph per "slice" of prompts/corruptions)
 3. Compares slices using **kernel methods** (classical and quantum) to induce a similarity geometry over circuits
 
+## Current Publication Track
+
+The repo is currently being tightened around the classical publication path:
+
+- Canonical method object: one correlation graph per `slice`
+- Main benchmark: `IOI`
+- Main claim: cheap correlational proposal plus interventional causal validation
+- Auxiliary evidence only: `WL + linear/RBF SVM`, bootstrap-slice WL,
+  fixed-layout adjacency baselines, and null controls
+
+For reproducible sweeps over `seed`, `k`, `node_types`, and `num_examples`, use:
+
+```bash
+uv run python scripts/run_classical_publication_study.py --model-name toy_transformer
+```
+
 ## Installation
 
 ```bash
@@ -123,6 +139,48 @@ uv run pig causal-eval --model-name gpt2 --no-require-clean-better
 
 # Reuse an existing non-empty output directory (explicit opt-in)
 uv run pig causal-eval --model-name gpt2 --output-dir outputs/causal_eval/manual_run --overwrite
+```
+
+# Classical publication sweep
+
+The publication runner writes per-run JSON plus an aggregate CSV summary:
+
+```bash
+uv run python scripts/run_classical_publication_study.py \
+  --model-name toy_transformer \
+  --seeds 7,42,123 \
+  --k-grid 1,3,5,10 \
+  --node-types-grid 'res;res,mlp,att'
+```
+
+The runner keeps the legacy per-example `WL + SVM` columns and also reports
+bootstrap-slice WL, fixed-layout adjacency baselines, and label/topology/weight
+null-control deltas in `auxiliary_baselines`.
+
+For causal sensitivity analysis without the `clean_score > base_score` filter:
+
+```bash
+uv run python scripts/run_classical_publication_study.py \
+  --model-name gpt2 \
+  --seeds 7,42,123 \
+  --k-grid 5 \
+  --num-examples-grid 20 \
+  --node-types-grid 'res' \
+  --no-causal-require-clean-better
+```
+
+Default outputs land in:
+
+- `outputs/classical_publication/<model>_<utc>/results.json`
+- `outputs/classical_publication/<model>_<utc>/summary.csv`
+- `outputs/classical_publication/<model>_<utc>/runs/*.json`
+
+To aggregate a finished study into a short markdown report with post-filter slice balance:
+
+```bash
+uv run python scripts/summarize_classical_publication_study.py \
+  outputs/classical_publication/<model>_<utc> \
+  --output outputs/classical_publication/<model>_<utc>/summary_report.md
 ```
 
 Cache safety policy:
