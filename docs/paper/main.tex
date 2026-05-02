@@ -60,7 +60,7 @@
 \maketitle
 
 \begin{abstract}
-Mechanistic interpretability seeks to identify the internal algorithms implemented by trained neural networks. Activation patching exposes rich node-level signals, but the resulting tensors are difficult to compare and scale directly. We formalise patching-based interpretability graphs (PIG), a pipeline that compresses activation-patching signals into sparse directed graph representations, one per task slice. We use slice classification as a probe of signal preservation, not as an end in itself, and compare raw patch-effect baselines, fixed-layout graph features, WL subtree features, spectral descriptors, graphlet counts, hashed edge-slot features, and coarse bucket counts. On the indirect object identification task with GPT-2, raw patch-effect node vectors achieve $1.0000$ mean accuracy and top-$k$ node identity features achieve $0.9896$, showing that the corruption signal is already present in localized patching measurements. Fixed-layout signed graph features also achieve $0.9896$ but require $N(N-1)$ coordinates. Among scalable graph compressions, hashed fixed-layout features achieve $0.9375$ accuracy with $1024$ dimensions, while coarse bucket counts achieve $0.9271$ accuracy with approximately $105$ features. Global shape summaries such as spectral and graphlet features perform much worse, indicating that overly aggressive compression discards localized mechanistic information. Null controls reduce fixed-layout performance to chance, and a pilot causal check finds higher mediation scores for top-ranked graph proposals than for random or low-ranked edges.
+Mechanistic interpretability seeks to identify the internal algorithms implemented by trained neural networks. Activation patching exposes rich node-level signals, but the resulting tensors are difficult to compare and scale directly. We formalise patching-based interpretability graphs (PIG), a pipeline that compresses activation-patching signals into sparse directed graph representations, one per task slice. We use slice classification as a probe of signal preservation, not as an end in itself, and compare raw patch-effect baselines, fixed-layout graph features, WL subtree features, spectral descriptors, graphlet counts, hashed edge-slot features, and coarse bucket counts. On the indirect object identification task with GPT-2, per-example diagnostic baselines show that raw patch-effect node vectors achieve $1.0000$ mean accuracy and top-$k$ node identity features achieve $0.9896$, indicating that the corruption signal is already present in localized patching measurements. Under the stricter example-disjoint graph split, fixed-layout signed graph features also achieve $0.9896$ but require $N(N-1)$ coordinates. Among scalable graph compressions, hashed fixed-layout features achieve $0.9375$ accuracy with $1024$ dimensions, while coarse bucket counts achieve $0.9271$ accuracy with approximately $105$ features. Global shape summaries such as spectral and graphlet features perform much worse, indicating that overly aggressive compression discards localized mechanistic information. Null controls reduce fixed-layout performance to chance, and a pilot causal check finds higher mediation scores for top-ranked graph proposals than for random or low-ranked edges.
 \end{abstract}
 
 \section{Introduction}
@@ -186,7 +186,7 @@ Each representation is mapped to a feature vector $\phi(G_s) \in \R^d$. We train
 
 \textbf{Task.} We evaluate on the indirect object identification (IOI) task \cite{turpin2023algorithmic}, where models must identify the indirect object in sentences such as ``Alice gave Bob a book. Bob thanked \_\_\_.'' Corruptions break the expected causal chain: in \texttt{name\_swap}, one of the names is replaced with a distractor; in \texttt{abba}, both names are swapped.
 
-\textbf{Evaluation.} We use seeds $\{7, 42, 123\}$ and $n \in \{20, 100, 500\}$ prompt pairs per corruption per seed. For $n=100$ and $n=500$, we use an example-disjoint split: $80$ (or $400$) training examples generate $32$ bootstrap graphs per slice, and $20$ (or $100$) test examples generate $32$ independent bootstrap graphs. Bootstrap graphs are constructed by resampling $75\%$ of the slice examples (with replacement, minimum $3$ examples) and recomputing the full graph for each resample. This procedure prevents the test-set leakage that can occur when the same prompt contributes to both training and test bootstrap graphs. All normalisation and hyperparameter selection are performed within each fold to prevent leakage. We report mean accuracy $\pm$ standard deviation across the three seeds. We avoid confidence intervals because three seeds are insufficient for stable interval estimates.
+\textbf{Evaluation.} We use seeds $\{7, 42, 123\}$ and $n \in \{20, 100, 500\}$ prompt pairs per corruption per seed. For $n=100$ and $n=500$, graph representation results use an example-disjoint split: $80$ (or $400$) training examples generate $32$ bootstrap graphs per slice, and $20$ (or $100$) test examples generate $32$ independent bootstrap graphs. Bootstrap graphs are constructed by resampling $75\%$ of the slice examples (with replacement, minimum $3$ examples) and recomputing the full graph for each resample. This procedure prevents the test-set leakage that can occur when the same prompt contributes to both training and test bootstrap graphs. Non-graph raw patch-effect and top-$k$ node rows are reported as per-example diagnostic upper bounds, not as graph-bootstrap results. All normalisation uses training-set statistics only; per-example diagnostics use fold-local normalisation. We report mean accuracy $\pm$ standard deviation across the three seeds. We avoid confidence intervals because three seeds are insufficient for stable interval estimates.
 
 \textbf{Null controls.} At test time, we apply multiple null controls: edge shuffle (randomly reassign edge targets while preserving edge-weight multiset), weight shuffle (permute weights across edges while preserving edge positions), sign shuffle (flip edge signs randomly), node-label shuffle (randomly permute node identities), and label permutation. These test whether the fixed-layout signal survives when edge positions, signs, node identities, or labels are deliberately destroyed.
 
@@ -210,7 +210,7 @@ Prompts per corruption & $n \in \{20, 100, 500\}$ \\
 Bootstrap graphs per slice & 32 \\
 Bootstrap sample fraction & 0.75 \\
 Bootstrap min examples & 3 \\
-Classification & Linear SVM, 5-fold stratified CV \\
+Classification & Linear SVM, example-disjoint train/test for graph rows \\
 \bottomrule
 \end{tabular}
 \caption{Experimental configuration. All results use residual-stream-only nodes unless otherwise noted.}
@@ -251,7 +251,7 @@ Graphlet shape linear & $0.6354$ & $0.0849$ & $38$ \\
 \toprule
 \textbf{Representation} & \textbf{Acc.} & \textbf{Std} & \textbf{Dim.} & \textbf{Role} \\
 \midrule
-\multicolumn{5}{l}{\textit{Signal upper bounds and localization baselines}} \\
+\multicolumn{5}{l}{\textit{Per-example signal diagnostics and localization baselines}} \\
 Patch-effect node vector & $1.0000$ & $0.0000$ & $N\!\times\!D$ & Raw patching signal \\
 Top-$k$ node identity & $0.9896$ & $0.0147$ & $10$ & Localized node identity \\
 Global histogram & $0.5021$ & $0.0029$ & $70$ & Non-local summary \\
@@ -269,7 +269,7 @@ Node-label-shuffle & $0.5000$ & $0.0000$ & --- & --- \\
 Label permutation & $0.5000$ & $0.0000$ & $N^2\!-\!N$ & --- \\
 \bottomrule
 \end{tabular}
-\caption{Compression trade-offs, non-graph baselines, and null controls on IOI ($n=100$, seeds $\{7,42,123\}$). Raw patch-effect and top-$k$ node baselines show that classification signal is already present before graph construction. Scalable graph compressions preserve much of this localized signal while reducing dimensionality. Null controls show that fixed-layout performance depends on preserving signed node/edge identities.}
+\caption{Compression trade-offs, non-graph baselines, and null controls on IOI ($n=100$, seeds $\{7,42,123\}$). Raw patch-effect and top-$k$ node rows are per-example diagnostic upper bounds showing that classification signal is already present before graph construction; they are not graph-bootstrap results. Scalable graph compressions preserve much of this localized signal while reducing dimensionality. Null controls show that fixed-layout performance depends on preserving signed node/edge identities.}
 \label{tab:baselines}
 \end{table}
 
@@ -321,7 +321,7 @@ Low-ranked & $-0.015$ & $-0.008$ & $20$ \\
 
 \subsection{What Classification Measures}
 
-The non-graph baselines are central to interpreting the results. Raw patch-effect node vectors achieve $1.0000$ accuracy, and top-$k$ node identity features achieve $0.9896$. These baselines show that the IOI corruption signal is already present in localized activation-patching measurements. Therefore, classification accuracy should not be read as evidence that graph construction is necessary for detecting the corruption type. Instead, we use classification as a probe for how much of the raw patching signal is preserved after graph construction, sparsification, and compression.
+The non-graph baselines are central to interpreting the results. In per-example diagnostic evaluations, raw patch-effect node vectors achieve $1.0000$ accuracy, and top-$k$ node identity features achieve $0.9896$. These baselines show that the IOI corruption signal is already present in localized activation-patching measurements, but they should be read as upper-bound sanity checks rather than as graph-level results. Therefore, classification accuracy should not be read as evidence that graph construction is necessary for detecting the corruption type. Instead, we use classification as a probe for how much of the raw patching signal is preserved after graph construction, sparsification, and compression.
 
 \subsection{Compression Trade-offs}
 
