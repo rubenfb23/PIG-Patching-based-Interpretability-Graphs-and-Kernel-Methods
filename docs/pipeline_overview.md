@@ -126,7 +126,7 @@ Dado un transformer que produce una respuesta correcta con `x_cln` y una incorre
 
 1. Calcula $E_u$ para **todos los nodos** de todas las capas y tokens
 2. Construye un **grafo** donde los nodos son posiciones del transformer y los pesos de las aristas reflejan la co-variación de efectos entre nodos
-3. Compara esos grafos (entre slices `name_swap` vs `abba`) usando kernels clásicos y cuánticos
+3. Usa los grafos por `slice` como objeto canónico del método y deja la clasificación clásica como evidencia auxiliar
 
 > Técnica popularizada por *"Locating and Editing Factual Associations in GPT"* (Meng et al., 2022) y *"Interpretability in the Wild"* (Wang et al., 2022) — este último precisamente en la tarea IOI que usa este repo.
 
@@ -134,14 +134,25 @@ Dado un transformer que produce una respuesta correcta con `x_cln` y una incorre
 
 ## 4. Pipeline de comparación
 
-### Paso 1 — Grafo de influencia por slice
+### Paso 1 — Grafo canónico por slice
 
 Para cada slice (`name_swap`, `abba`) se construye un `PatchInfluenceGraph` (`src/pig/graph.py`):
 - Nodos = posiciones del transformer
 - Aristas ponderadas por co-variación de efectos entre nodos
 - Top-k sparsificación para estandarizar densidad
 
-Cada ejemplo de ese slice produce su propio grafo.
+Este es el objeto principal de PIG para discovery y validación causal.
+
+### Paso 1b — Grafo auxiliar por ejemplo
+
+`build_per_example()` genera grafos adicionales para clasificación auxiliar.
+No son el objeto canónico del método: se usan solo para tener suficientes muestras en `WL + SVM`.
+
+### Paso 1c — Grafos bootstrap por slice
+
+`build_bootstrap_slice_graphs()` re-muestrea ejemplos dentro de cada slice y
+vuelve a construir grafos de correlación. Esto da más muestras para
+clasificación auxiliar sin abandonar la semántica del grafo canónico por slice.
 
 ### Paso 2 — Embedding WL (Weisfeiler-Lehman)
 
@@ -153,29 +164,37 @@ grafo → WL iterations → hash de vecindarios → histograma de features
 
 Resultado: una matriz `X` de forma `[n_ejemplos, n_features_WL]`.
 
-### Paso 3a — Kernel clásico (baseline)
+La pipeline clásica ahora compara WL contra un baseline `fixed-layout`, que
+vectoriza directamente los pesos `src -> dst` sobre el layout fijo del
+transformer. Si este baseline iguala o supera a WL, WL no está añadiendo mucha
+información estructural.
+
+### Paso 3a — Kernel clásico (evidencia auxiliar)
 
 `src/pig/kernels.py` entrena un **SVM** con:
 
 - `linear`: producto escalar sobre features WL
 - `rbf`: similitud gaussiana $\exp(-\gamma \|x_i - x_j\|^2)$
 
-Métricas reportadas: **accuracy** y **AUC-ROC** en clasificar a qué slice pertenece cada grafo.
+Métricas reportadas: **accuracy** y **AUC-ROC** en clasificar a qué slice pertenece cada grafo auxiliar.
+La evaluación clásica usa normalización dentro del CV para evitar leakage.
+El runner también reporta controles nulos con permutación de etiquetas,
+shuffle de topología y shuffle de pesos; el valor útil es el delta entre la
+accuracy observada y la accuracy bajo control nulo.
 
-### Paso 3b — Kernel cuántico
+### Paso 3b — Validación causal multinivel
 
-`src/pig/quantum.py`:
+`src/pig/causal.py` toma candidatos propuestos por correlación y los somete a:
 
-1. **Reducción de dimensionalidad** (PCA o proyección aleatoria) a `n_components=4`
-2. **Feature map cuántico**: cada vector se codifica como statevector con compuertas $H$, $R_z$, $R_x$, $CZ$
-3. **Kernel de fidelidad**: $K(i,j) = |\langle \psi_i | \psi_j \rangle|^2$
-4. **SVM `precomputed`**: usa la matriz $K$ directamente
+1. Split disjunto `discovery/evaluation`
+2. Métricas de influencia/restauración/mediación
+3. Correcciones por múltiples tests
+4. Resumen de qué parte del grafo correlacional sobrevive como backbone causal
 
 ### La pregunta de fondo
 
-¿Puede un clasificador distinguir `name_swap` de `abba` mirando solo las firmas de activación-patching?  
-Si lo logra (accuracy > azar), significa que las dos corrupciones activan mecanismos internos **estructuralmente distintos** en el transformer.  
-El kernel cuántico se compara contra los baselines clásicos para ver si ofrece ventaja discriminativa.
+¿Qué fracción de los edges propuestos por correlación sobrevive validación causal estricta, con qué estabilidad y a qué coste?  
+La clasificación clásica responde una pregunta secundaria: si los grafos auxiliares contienen señal suficiente para distinguir slices, entonces la representación estructural no es trivial.
 
 ---
 

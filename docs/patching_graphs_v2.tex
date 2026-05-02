@@ -9,7 +9,11 @@
 
 \documentclass[aspectratio=169,xcolor={dvipsnames}]{beamer}
 \usetheme{Madrid}
+\IfFileExists{beamercolorthemeDusk.sty}{%
 \usecolortheme{Dusk}
+}{%
+\usecolortheme{default}
+}
 
 \renewcommand{\accent}[1]{\textbf{#1}}
 \newcommand{\smalltitle}[1]{\textbf{#1}}
@@ -17,7 +21,20 @@
 \usepackage{amsmath,amssymb,amsthm}
 \usepackage{mathtools}
 \usepackage{bm}
+\IfFileExists{algorithm2e.sty}{%
 \usepackage[ruled,vlined]{algorithm2e}
+}{%
+\newenvironment{algorithm}[1][]{\begin{center}\begin{minipage}{0.95\linewidth}\small}{\end{minipage}\end{center}}
+\newcommand{\DontPrintSemicolon}{}
+\newcommand{\SetAlgoLined}{}
+\newcommand{\SetKwInOut}[2]{\expandafter\newcommand\csname #1\endcsname[1]{\par\textbf{#2:} ##1\par}}
+\newcommand{\BlankLine}{\par\smallskip}
+\newcommand{\For}[2]{\par\textbf{for} #1 #2\par}
+\newcommand{\uIf}[2]{\par\textbf{if} #1 #2\par}
+\newcommand{\ElseIf}[2]{\par\textbf{else if} #1 #2\par}
+\newcommand{\tcp}[1]{\emph{#1}\par}
+\renewcommand{\caption}[1]{\par\smallskip\textbf{#1}\par}
+}
 \usepackage{tikz}
 \usetikzlibrary{arrows.meta,calc,positioning,fit,backgrounds,shapes.geometric}
 \usepackage{graphicx}
@@ -2214,6 +2231,33 @@ accuracy vs noise;\;
 kernel spectrum;\;
 clustering visualization (kernel PCA / t-SNE);\;
 shot-noise curves for $k_q$.
+\end{block}
+\end{frame}
+
+
+\begin{frame}[shrink=24]{Reproducible Artifact Status (current repo state)}
+\small
+\begin{block}{Regenerated toy-model baselines (this pass)}
+\centering
+\begin{tabular}{lcc}
+Method & Setting & Accuracy mean $\pm$ std \\
+\hline
+WL+SVM linear & top-$k=5$, seeds $\{7,42,123\}$ & $0.989 \pm 0.016$ \\
+WL+SVM RBF & top-$k=5$, seeds $\{7,42,123\}$ & $1.000 \pm 0.000$ \\
+Quantum fidelity kernel & top-$k=5$, seeds $\{7,42,123\}$ & $0.978 \pm 0.031$ \\
+\end{tabular}
+\end{block}
+
+\begin{block}{Additional audited artifacts already present}
+\begin{itemize}\setlength\itemsep{2pt}
+\item Top-$k$ mini-ablation reproduced on the toy model: at $k=3$, linear $0.989 \pm 0.016$, RBF $0.944 \pm 0.042$, quantum $0.811 \pm 0.031$.
+\item Toy causal eval artifact exists in \texttt{outputs/causal_eval/causal_eval.json}: 20 prompt pairs, 5 evaluated edges, seed 42; first edge summary $R_u=0.726$, $R_{uv}=1.452$, $M=0.726$.
+\item Heatmap metadata exists for \texttt{ioi:abba} and \texttt{ioi:name\_swap}: matrix shape $12\times 11$, 8/16 selected examples, aggregation \texttt{mean}.
+\end{itemize}
+\end{block}
+
+\begin{block}{Artifact completeness status}
+Current outputs support a reproducible toy-model end-to-end run and accuracy-based paper tables. F1/AUC for these baselines and broader GPT-2 multi-seed kernel sweeps are not emitted by the present artifact set, so they remain reported as N/A.
 \end{block}
 \end{frame}
 

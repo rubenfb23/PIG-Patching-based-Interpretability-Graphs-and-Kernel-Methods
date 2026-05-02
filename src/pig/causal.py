@@ -881,6 +881,188 @@ def propose_causal_edge_candidates(
     return candidates
 
 
+def propose_random_edge_candidates(
+    tensors: Sequence[PatchEffectTensor],
+    num_edges: int,
+    node_types: Sequence[str] = (NODE_TYPE_ATT,),
+    enforce_direction: bool = True,
+    seed: int = 42,
+) -> list[CausalEdgeCandidate]:
+    """Propose random edge candidates for causal baseline comparison.
+
+    Uses the same node set as ``propose_causal_edge_candidates`` but
+    selects edges uniformly at random from valid edge slots. This
+    provides a null baseline for the causal evaluation.
+    """
+    if not tensors:
+        return []
+    if num_edges <= 0:
+        return []
+
+    for node_type in node_types:
+        _validate_node_type(node_type)
+
+    component_axis = tensors[0].component_axis
+    if not component_axis:
+        return []
+
+    num_layers = tensors[0].num_layers
+    min_tokens = min(t.num_tokens for t in tensors)
+    num_components = len(component_axis)
+
+    nodes = [
+        Node.from_index(i, num_tokens=min_tokens, component_axis=component_axis)
+        for i in range(num_layers * min_tokens * num_components)
+    ]
+    allowed_types = set(node_types)
+    valid_indices = [
+        index
+        for index, node in enumerate(nodes)
+        if node.node_type in allowed_types
+    ]
+
+    # Collect all valid edges
+    valid_edges: list[tuple[int, int]] = []
+    for src_idx in valid_indices:
+        src = nodes[src_idx]
+        for dst_idx in valid_indices:
+            if src_idx == dst_idx:
+                continue
+            dst = nodes[dst_idx]
+            if enforce_direction and not (src < dst):
+                continue
+            if (
+                src.node_type == NODE_TYPE_ATT
+                and dst.node_type == NODE_TYPE_ATT
+                and src.layer == dst.layer
+            ):
+                continue
+            valid_edges.append((src_idx, dst_idx))
+
+    if not valid_edges:
+        return []
+
+    rng = np.random.default_rng(seed)
+    chosen = rng.choice(len(valid_edges), size=min(num_edges, len(valid_edges)), replace=False)
+    rng = np.random.default_rng(seed + 1)  # Shuffle chosen edges
+    chosen = rng.permutation(chosen)
+
+    candidates: list[CausalEdgeCandidate] = []
+    for rank, idx in enumerate(chosen[:num_edges], start=1):
+        src_idx, dst_idx = valid_edges[int(idx)]
+        src = nodes[src_idx]
+        dst = nodes[dst_idx]
+        candidates.append(
+            CausalEdgeCandidate(
+                src_layer=src.layer,
+                src_token=src.token,
+                src_node_type=src.node_type,
+                src_head=src.head,
+                dst_layer=dst.layer,
+                dst_token=dst.token,
+                dst_node_type=dst.node_type,
+                dst_head=dst.head,
+                correlation_score=0.0,
+                rank=rank,
+            )
+        )
+    return candidates
+
+
+def propose_lowrank_edge_candidates(
+    tensors: Sequence[PatchEffectTensor],
+    num_edges: int,
+    node_types: Sequence[str] = (NODE_TYPE_ATT,),
+    enforce_direction: bool = True,
+    eps: float = 1e-6,
+) -> list[CausalEdgeCandidate]:
+    """Propose low-ranked edge candidates (lowest correlation scores).
+
+    Uses the same scoring as ``propose_causal_edge_candidates`` but
+    returns the edges with the lowest correlation scores. This provides
+    a negative-control baseline: edges the graph construction predicts
+    should have the weakest co-variation.
+    """
+    if not tensors:
+        return []
+
+    component_axis = tensors[0].component_axis
+    if not component_axis:
+        return []
+
+    num_layers = tensors[0].num_layers
+    min_tokens = min(t.num_tokens for t in tensors)
+    num_components = len(component_axis)
+
+    normalized_rows: list[NDArray[np.float64]] = []
+    for tensor in tensors:
+        delta = max(float(tensor.clean_score - tensor.base_score), eps)
+        normalized = tensor.effects[:, :min_tokens, :] / delta
+        normalized_rows.append(normalized.reshape(-1).astype(np.float64, copy=False))
+
+    matrix = np.stack(normalized_rows, axis=0)
+    centered = matrix - matrix.mean(axis=0, keepdims=True)
+    std = np.std(centered, axis=0, keepdims=True)
+    std = np.where(std < 1e-8, 1.0, std)
+    normalized = centered / std
+    corr = (normalized.T @ normalized) / max(1, normalized.shape[0])
+    corr = corr.astype(np.float64, copy=False)
+    np.fill_diagonal(corr, 0.0)
+
+    nodes = [
+        Node.from_index(i, num_tokens=min_tokens, component_axis=component_axis)
+        for i in range(num_layers * min_tokens * num_components)
+    ]
+    allowed_types = set(node_types)
+    valid_indices = [
+        index
+        for index, node in enumerate(nodes)
+        if node.node_type in allowed_types
+    ]
+
+    scored: list[tuple[float, float, int, int]] = []
+    for src_idx in valid_indices:
+        src = nodes[src_idx]
+        for dst_idx in valid_indices:
+            if src_idx == dst_idx:
+                continue
+            dst = nodes[dst_idx]
+            if enforce_direction and not (src < dst):
+                continue
+            if (
+                src.node_type == NODE_TYPE_ATT
+                and dst.node_type == NODE_TYPE_ATT
+                and src.layer == dst.layer
+            ):
+                continue
+            weight = float(corr[src_idx, dst_idx])
+            if not np.isfinite(weight):
+                continue
+            scored.append((abs(weight), weight, src_idx, dst_idx))
+
+    scored.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+    # Take lowest-ranked edges
+    candidates: list[CausalEdgeCandidate] = []
+    for rank, (_, weight, src_idx, dst_idx) in enumerate(scored[:num_edges], start=1):
+        src = nodes[src_idx]
+        dst = nodes[dst_idx]
+        candidates.append(
+            CausalEdgeCandidate(
+                src_layer=src.layer,
+                src_token=src.token,
+                src_node_type=src.node_type,
+                src_head=src.head,
+                dst_layer=dst.layer,
+                dst_token=dst.token,
+                dst_node_type=dst.node_type,
+                dst_head=dst.head,
+                correlation_score=weight,
+                rank=rank,
+            )
+        )
+    return candidates
+
+
 def evaluate_causal_edges(
     model: HookedModel,
     prompt_pairs: Sequence[PromptPair],
