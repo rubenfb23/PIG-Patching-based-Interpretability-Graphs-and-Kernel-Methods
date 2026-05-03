@@ -48,21 +48,6 @@ Kevin Wang, Anh Luu, Roger Chen, Alexander Turner, Prafulla Varma, Neel Nanda,
 \newblock \emph{Transformer Circuits Thread}, 2023.
 \newblock URL \url{https://transformer-circuits.pub/}.
 
-\bibitem[Shervashidze et~al.(2011)Shervashidze, Schweitzer, van Leeuwen,
-  Meisen, and M{\"u}ller]{shervashidze2011weisfeiler}
-Nino Shervashidze, Peter Schweitzer, Erik~Jan van Leeuwen, Torsten Meisen, and
-  Thomas M{\"u}ller.
-\newblock Weisfeiler and l{\'e}maire go for graph kernels.
-\newblock In \emph{International Conference on Probabilistic, Combinatorial and
-  Asymptotic Methods for the Analysis of Large Networks (ALGOLEN)}, pages
-  71--86. Springer, 2011.
-
-\bibitem[Morris et~al.(2019)Morris, Ritz, and Kern]{morris2019weisfeiler}
-Christian Morris, Martin Ritz, and Wilfried Kern.
-\newblock Weisfeiler and lemaire go deep: Higher-order graph kernels.
-\newblock \emph{Journal of Machine Learning Research}, 20\penalty0
-  (21):\penalty0 1--54, 2019.
-
 \bibitem[Turpin et~al.(2023)Turpin, Michael, Henighan, and
   Elhage]{turpin2023algorithmic}
 Michael Turpin, Jonathan Michael, Tom Henighan, and Nelson Elhage.
@@ -111,6 +96,21 @@ Michael Hanna, Massimo Montanari, Samuel Reichman, and Ido Olshansky.
 \newblock Transformer circuits: Circuit extraction.
 \newblock \emph{Transformer Circuits Thread}, 2023.
 \newblock URL \url{https://transformer-circuits.pub/}.
+
+\bibitem[Morris et~al.(2019)Morris, Ritz, and Kern]{morris2019weisfeiler}
+Christian Morris, Martin Ritz, and Wilfried Kern.
+\newblock Weisfeiler and lemaire go deep: Higher-order graph kernels.
+\newblock \emph{Journal of Machine Learning Research}, 20\penalty0
+  (21):\penalty0 1--54, 2019.
+
+\bibitem[Shervashidze et~al.(2011)Shervashidze, Schweitzer, van Leeuwen,
+  Meisen, and M{\"u}ller]{shervashidze2011weisfeiler}
+Nino Shervashidze, Peter Schweitzer, Erik~Jan van Leeuwen, Torsten Meisen, and
+  Thomas M{\"u}ller.
+\newblock Weisfeiler and l{\'e}maire go for graph kernels.
+\newblock In \emph{International Conference on Probabilistic, Combinatorial and
+  Asymptotic Methods for the Analysis of Large Networks (ALGOLEN)}, pages
+  71--86. Springer, 2011.
 
 \bibitem[Gupta et~al.(2024)Gupta, Turner, McCready, and von
   Werra]{gupta2023sparse}

@@ -1,33 +1,35 @@
-# Paper Data Audit — 2026-05-02
+# Paper Data Audit — 2026-05-03
 
 Scope: `docs/paper/main.tex` numerical claims after checking provenance against
 local `outputs/` and the experiment runners.
 
-## Keep as primary results
+## GPT-2 n=100 (primary)
 
-These values are traceable to `scripts/run_paper_decision_study.py`, which splits
-prompt pairs before graph bootstrapping.
-
-Source: `outputs/paper_decision/gpt2_n100_res_k5_spectral_graphlets_20260430/summary.csv`
+**Source:** `outputs/paper_decision/gpt2_20260502T203614Z/summary.csv`
+**Runs:** 3 seeds {7, 42, 123}, corruptions {name_swap, abba}, k=5, res-only
+**Protocol:** Example-disjoint bootstrap split (80/20 per corruption)
 
 | Metric | Values by seed | Mean | Pop. std |
 |---|---:|---:|---:|
 | WL bootstrap linear | 0.7969, 0.5469, 0.9531 | 0.7656 | 0.1673 |
 | Fixed layout weighted linear | 0.9531, 0.6562, 1.0000 | 0.8698 | 0.1522 |
 | Fixed layout binary linear | 0.9844, 0.8281, 0.9844 | 0.9323 | 0.0737 |
-| Fixed layout signed linear | 1.0000, 0.9688, 1.0000 | 0.9896 | 0.0147 |
+| **Fixed layout signed linear** | 1.0000, 0.9688, 1.0000 | 0.9896 | 0.0147 |
 | Spectral shape linear | 0.5938, 0.5469, 0.6719 | 0.6042 | 0.0516 |
 | Graphlet shape linear | 0.5469, 0.6094, 0.7500 | 0.6354 | 0.0849 |
-
-Source: `outputs/paper_decision/gpt2_n100_res_k5_scalable_representations_20260430/summary.csv`
-
-| Metric | Values by seed | Mean | Pop. std |
-|---|---:|---:|---:|
 | Hashed fixed-layout signed | 0.9688, 0.9531, 0.8906 | 0.9375 | 0.0338 |
 | Hashed fixed-layout weighted | 0.8750, 0.9531, 0.9062 | 0.9115 | 0.0321 |
 | Coarse count | 0.9219, 0.9375, 0.9219 | 0.9271 | 0.0074 |
+| Patch-effect raw | 0.9500, 0.9750, 0.9500 | 0.9583 | 0.0118 |
+| Top-k node identity | 0.9750, 0.9750, 0.9500 | 0.9667 | 0.0118 |
+| Null: edge-shuffle | 0.5000, 0.5000, 0.5000 | 0.5000 | 0.0000 |
+| Null: weight-shuffle | 0.5000, 0.5063, 0.4979 | 0.5021 | 0.0029 |
 
-Source: `outputs/paper_decision/gpt2_n500_res_k5_scalable_representations_20260430/summary.csv`
+## GPT-2 n=500 (scalable)
+
+**Source:** `outputs/paper_decision/gpt2_n500_res_k5_scalable_representations_20260430/summary.csv`
+**Runs:** Single seed (no multiple seeds available), corruptions {name_swap, abba}
+**Note:** n=500 results use single-seed values (no std).
 
 | Metric | Mean |
 |---|---:|
@@ -36,27 +38,62 @@ Source: `outputs/paper_decision/gpt2_n500_res_k5_scalable_representations_202604
 | Hashed fixed-layout weighted | 0.9583 |
 | Coarse count | 0.9740 |
 | WL bootstrap linear | 1.0000 |
+| Spectral shape | 0.9115 |
+| Graphlet shape | 0.9948 |
 
-## Corrected or removed from the paper
+## distilGPT-2 n=100 (cross-model validation)
 
-- Removed exact raw patch-effect and top-k node diagnostic numbers from the main
-  narrative. They came from per-example diagnostics, not the graph bootstrap
-  protocol.
-- Removed `global_histogram` from the results table because no strict
-  `paper_decision` provenance was found.
-- Corrected scalable-row standard deviations:
-  - hashed signed: `0.0147 -> 0.0338`
-  - hashed weighted: `0.0237 -> 0.0321`
-  - coarse count: `0.0147 -> 0.0074`
-- Removed sign-shuffle, node-label-shuffle, and label-permutation rows from the
-  strict null-control table. The strict runner currently reports edge-shuffle
-  and weight-shuffle for the fixed-layout weighted baseline.
-- Removed the numeric pilot causal table. The exact values in the draft were
-  not traceable to the current GPT-2 `paper_decision` outputs.
+**Source:** `outputs/paper_decision/distilgpt2_20260502T203744Z/summary.csv`
+**Runs:** 3 seeds {7, 42, 123}, corruptions {name_swap, abba}, k=5, res-only
+**Note:** distilGPT-2 has 6 layers vs GPT-2's 12, so N=60 residual nodes and
+D_fixed = 3540. **This does NOT prove "all representations perfect"** — WL
+(0.6875), spectral (0.5521), and graphlet (0.6719) remain near-chance.
 
-## Follow-up experiment to run before claiming raw baselines
+| Metric | Values by seed | Mean | Pop. std |
+|---|---:|---:|---:|
+| Fixed layout signed | 1.0000, 1.0000, 1.0000 | 1.0000 | 0.0000 |
+| Hashed fixed-layout signed | 1.0000, 1.0000, 1.0000 | 1.0000 | 0.0000 |
+| Fixed layout weighted | 1.0000, 1.0000, 0.9844 | 0.9948 | 0.0074 |
+| Fixed layout binary | 0.9844, 0.9688, 1.0000 | 0.9844 | 0.0128 |
+| Hashed fixed-layout weighted | 1.0000, 1.0000, 0.9844 | 0.9948 | 0.0074 |
+| Coarse count | 0.8594, 0.8906, 0.9844 | 0.9115 | 0.0531 |
+| **Patch-effect raw** | 1.0000, 1.0000, 1.0000 | 1.0000 | 0.0000 |
+| **Top-k node identity** | 1.0000, 1.0000, 0.9250 | 0.9750 | 0.0354 |
+| WL bootstrap | 0.8594, 0.5469, 0.6563 | 0.6875 | 0.1295 |
+| Graphlet shape | 0.5781, 0.8594, 0.5781 | 0.6719 | 0.1326 |
+| Spectral shape | 0.5625, 0.5625, 0.5313 | 0.5521 | 0.0147 |
 
-`scripts/run_paper_decision_study.py` now includes strict train/test metrics for
-`patch_effect_node_vector` and `topk_node_identity`. Re-run the GPT-2 n=100
-paper-decision study from cache or full patching output before reporting those
-numbers in the paper.
+**Key correction:** coarse count on distilGPT-2 (0.9115) is **lower** than on
+GPT-2 (0.9271), not higher. The claim "compressed representations achieve higher
+accuracy than on GPT-2" is **incorrect**. The correct claim is that the
+*qualitative pattern* is preserved: fixed-layout and hashed features reach the
+highest accuracy, shape summaries remain near-chance.
+
+## Aggregated outputs
+
+**Source:** `outputs/paper_compression_frontier.csv`
+**Source:** `outputs/paper_compression_frontier.md`
+**Generated by:** `scripts/build_compression_frontier.py`
+
+These files aggregate all sweep results into unified tables. The aggregation:
+- Reads summary.csv from new sweep directories only (model_TIMESTAMP format)
+- Deduplicates by (model, n, seed) — newer sweeps take priority
+- Uses only `_linear` columns (RBF removed to prevent double-counting)
+- Computes fixed_layout dim from model: gpt2=14280, distilgpt2=3540
+- Computes coarse count dim from the actual number of buckets per run
+
+## Script provenance
+
+- `scripts/run_paper_decision_study.py` — main runner, example-disjoint protocol
+- `scripts/build_compression_frontier.py` — aggregation into unified tables/figures
+- `scripts/generate_paper_figures.py` — pipeline diagram, scalable performance
+
+## Paper-to-data mapping
+
+| Paper table/section | Source data |
+|---|---|
+| Table \ref{tab:main} (main results) | gpt2_20260502T203614Z, 3 seeds, n=100 |
+| Table \ref{tab:baselines} (scalable/null) | gpt2_20260502T203614Z + null controls |
+| Table \ref{tab:scalable} (scalable) | gpt2_20260502T203614Z (n=100) + gpt2_n500 |
+| Table \ref{tab:distilgpt2} (cross-model) | distilgpt2_20260502T203744Z, 3 seeds, n=100 |
+| Abstract numbers | Same sources as tables above |
