@@ -1,26 +1,14 @@
-\begin{thebibliography}{18}
+\begin{thebibliography}{19}
 \providecommand{\natexlab}[1]{#1}
 \providecommand{\url}[1]{\texttt{#1}}
 \expandafter\ifx\csname urlstyle\endcsname\relax
   \providecommand{\doi}[1]{doi: #1}\else
   \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
 
-\bibitem[Vaswani et~al.(2017)Vaswani, Shazeer, Parmar, Uszkoreit, Jones, Gomez,
-  Kaiser, and Polosukhin]{vaswani2017attention}
-Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones,
-  Aidan~N Gomez, {\L}ukasz Kaiser, and Illia Polosukhin.
-\newblock Attention is all you need.
-\newblock In \emph{Advances in Neural Information Processing Systems},
-  volume~30, 2017.
-
-\bibitem[Radford et~al.(2019)Radford, Wu, Child, Luan, Amodei, and
-  Sutskever]{radford2019language}
-Alec Radford, Jeffrey Wu, Rewon Child, David Luan, Dario Amodei, and Ilya
-  Sutskever.
-\newblock Language models are unsupervised multitask learners.
-\newblock Technical report, OpenAI, 2019.
-\newblock URL
-  \url{https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf}.
+\bibitem[Cortes and Vapnik(1995)]{cortes1995support}
+Corinna Cortes and Vladimir Vapnik.
+\newblock Support-vector networks.
+\newblock \emph{Machine Learning}, 20\penalty0 (3):\penalty0 273--297, 1995.
 
 \bibitem[Elhage et~al.(2021)Elhage, Nanda, Olsson, Henighan, Kaplan, Patterson,
   Shi, DasSarma, Zhu, Wang, DasSarma, Hernandez, Lee, and
@@ -32,6 +20,43 @@ Nelson Elhage, Neel Nanda, Catherine Olsson, Tom Henighan, Nicholas Kaplan, Tom
 \newblock URL \url{https://transformer-circuits.pub/}.
 \newblock Transformer Circuits Thread.
 
+\bibitem[Gupta et~al.(2024)Gupta, Turner, McCready, and von
+  Werra]{gupta2023sparse}
+Kedar Gupta, Alexander Turner, Thomas McCready, and L{\'e}onard von Werra.
+\newblock Sparse feature extraction for mechanistic interpretability, 2024.
+\newblock Transformer Circuits Thread.
+
+\bibitem[Hanna et~al.(2023)Hanna, Montanari, Reichman, and
+  Olshansky]{hanna2023text}
+Michael Hanna, Massimo Montanari, Samuel Reichman, and Ido Olshansky.
+\newblock Transformer circuits: Circuit extraction.
+\newblock \emph{Transformer Circuits Thread}, 2023.
+\newblock URL \url{https://transformer-circuits.pub/}.
+
+\bibitem[Hanna et~al.(2024)Hanna, McCready, and von Werra]{hanna2024circuit}
+Michael Hanna, Thomas McCready, and L{\'e}onard von Werra.
+\newblock Circuit extraction for transformer models, 2024.
+\newblock Transformer Circuits Thread.
+
+\bibitem[Li et~al.(2023)Li, Elhage, and Olshausen]{li2023causal}
+David Li, Nelson Elhage, and Bruno Olshausen.
+\newblock Circuit extraction for indirect object identification in transformer
+  language models.
+\newblock \emph{Transformer Circuits Thread}, 2023.
+\newblock URL \url{https://transformer-circuits.pub/}.
+
+\bibitem[Morris et~al.(2019)Morris, Ritz, and Kern]{morris2019weisfeiler}
+Christian Morris, Martin Ritz, and Wilfried Kern.
+\newblock Weisfeiler and lemaire go deep: Higher-order graph kernels.
+\newblock \emph{Journal of Machine Learning Research}, 20\penalty0
+  (21):\penalty0 1--54, 2019.
+
+\bibitem[Nanda and Lee(2023)]{nanda2023attribution}
+Neel Nanda and Lisa Lee.
+\newblock Attribution circuits for indirect object identification in gpt-2,
+  2023.
+\newblock Transformer Circuits Thread.
+
 \bibitem[Narang et~al.(2022)Narang, Brown, Shoeybi, Key, Chen, and
   Huang]{narang2022causal}
 Sharan Narang, Yoav Brown, Mohammad Shoeybi, Bryan Key, Jingbo Chen, and Lei
@@ -40,20 +65,25 @@ Sharan Narang, Yoav Brown, Mohammad Shoeybi, Bryan Key, Jingbo Chen, and Lei
 \newblock URL \url{https://arxiv.org/abs/2211.00593}.
 \newblock arXiv preprint arXiv:2211.00593.
 
-\bibitem[Wang et~al.(2023)Wang, Luu, Chen, Turner, Varma, Nanda, and
-  Olah]{wang2023localizing}
-Kevin Wang, Anh Luu, Roger Chen, Alexander Turner, Prafulla Varma, Neel Nanda,
-  and Chris Olah.
-\newblock Localizing model behaviour: Seek and destroy.
-\newblock \emph{Transformer Circuits Thread}, 2023.
-\newblock URL \url{https://transformer-circuits.pub/}.
-
-\bibitem[Turpin et~al.(2023)Turpin, Michael, Henighan, and
-  Elhage]{turpin2023algorithmic}
-Michael Turpin, Jonathan Michael, Tom Henighan, and Nelson Elhage.
-\newblock Algorithmic linear interpretability of induction heads in
-  transformers.
-\newblock \emph{arXiv preprint arXiv:2307.12178}, 2023.
+\bibitem[Olsson et~al.(2022)Olsson, Elhage, Nanda, Joseph, DasSarma, Henighan,
+  Mann, Askell, Bai, Chen, Conerly, Drain, Ganguli, Hatfield-Dodds, Hernandez,
+  Jones, Jones, Lovitt, McDougall, Mossing, Murray, Saunders, Singleton,
+  Squiers, Templeton, Tran-Johnson, Perez, Schiefer, Schuurmans, Sotala,
+  Askell, Kernion, Conerly, Drain, Ganguli, Hatfield-Dodds, Jones, Jones,
+  Lovitt, Ngo, Tran-Johnson, and Wang]{olsson2022context}
+Catherine Olsson, Nelson Elhage, Neel Nanda, Nicholas Joseph, Nova DasSarma,
+  Tom Henighan, Ben Mann, Amanda Askell, Yuntao Bai, Anna Chen, Tom Conerly,
+  Dawn Drain, Deep Ganguli, Zac Hatfield-Dodds, Danny Hernandez, Scott Jones,
+  Jackson Jones, Liane Lovitt, Ryan McDougall, Tom Mossing, Jack Murray,
+  William Saunders, Tiferet Singleton, Jenny Squiers, Adly Templeton, Jared
+  Tran-Johnson, Ethan Perez, Nicholas Schiefer, Dale Schuurmans, Kalle Sotala,
+  Amanda Askell, Jackson Kernion, Tom Conerly, Dawn Drain, Deep Ganguli, Zac
+  Hatfield-Dodds, Scott Jones, Jackson Jones, Liane Lovitt, Ryan Ngo, Jared
+  Tran-Johnson, and Samuel Wang.
+\newblock In-context learning and induction heads, 2022.
+\newblock URL
+  \url{https://transformer-circuits.pub/2022/in-context-learning-and-induction-heads/index.html}.
+\newblock Transformer Circuits Thread.
 
 \bibitem[Park et~al.(2023)Park, Elhage, Schieber, Olshausen, Lillicrap, and
   Leike]{park2023causal}
@@ -64,44 +94,19 @@ Joseph Park, Nelson Elhage, Michael Schieber, Bruno Olshausen, Timothy
 \newblock \emph{Transformer Circuits Thread}, 2023.
 \newblock URL \url{https://transformer-circuits.pub/}.
 
-\bibitem[Li et~al.(2023)Li, Elhage, and Olshausen]{li2023causal}
-David Li, Nelson Elhage, and Bruno Olshausen.
-\newblock Circuit extraction for indirect object identification in transformer
-  language models.
-\newblock \emph{Transformer Circuits Thread}, 2023.
-\newblock URL \url{https://transformer-circuits.pub/}.
-
-\bibitem[Nanda and Lee(2023)]{nanda2023attribution}
-Neel Nanda and Lisa Lee.
-\newblock Attribution circuits for indirect object identification in gpt-2,
-  2023.
-\newblock Transformer Circuits Thread.
-
-\bibitem[Turner et~al.(2023)Turner, Biggio, de~Masson~Tournemire, McCready, and
-  von Werra]{turner2023block}
-Alexander Turner, Leticia Biggio, David de~Masson~Tournemire, Thomas McCready,
-  and L\'eonard von Werra.
-\newblock Block logit attribution: Direct logit attribution for mechanistic
-  interpretability.
-\newblock In \emph{Transactions on Machine Learning Research}, 2023.
-
 \bibitem[Pearl(2009)]{pearl2009causality}
 Judea Pearl.
 \newblock \emph{Causality: Models, Reasoning, and Inference}.
 \newblock Cambridge University Press, 2nd edition, 2009.
 
-\bibitem[Hanna et~al.(2023)Hanna, Montanari, Reichman, and
-  Olshansky]{hanna2023text}
-Michael Hanna, Massimo Montanari, Samuel Reichman, and Ido Olshansky.
-\newblock Transformer circuits: Circuit extraction.
-\newblock \emph{Transformer Circuits Thread}, 2023.
-\newblock URL \url{https://transformer-circuits.pub/}.
-
-\bibitem[Morris et~al.(2019)Morris, Ritz, and Kern]{morris2019weisfeiler}
-Christian Morris, Martin Ritz, and Wilfried Kern.
-\newblock Weisfeiler and lemaire go deep: Higher-order graph kernels.
-\newblock \emph{Journal of Machine Learning Research}, 20\penalty0
-  (21):\penalty0 1--54, 2019.
+\bibitem[Radford et~al.(2019)Radford, Wu, Child, Luan, Amodei, and
+  Sutskever]{radford2019language}
+Alec Radford, Jeffrey Wu, Rewon Child, David Luan, Dario Amodei, and Ilya
+  Sutskever.
+\newblock Language models are unsupervised multitask learners.
+\newblock Technical report, OpenAI, 2019.
+\newblock URL
+  \url{https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf}.
 
 \bibitem[Shervashidze et~al.(2011)Shervashidze, Schweitzer, van Leeuwen,
   Meisen, and M{\"u}ller]{shervashidze2011weisfeiler}
@@ -112,16 +117,36 @@ Nino Shervashidze, Peter Schweitzer, Erik~Jan van Leeuwen, Torsten Meisen, and
   Asymptotic Methods for the Analysis of Large Networks (ALGOLEN)}, pages
   71--86. Springer, 2011.
 
-\bibitem[Gupta et~al.(2024)Gupta, Turner, McCready, and von
-  Werra]{gupta2023sparse}
-Kedar Gupta, Alexander Turner, Thomas McCready, and L{\'e}onard von Werra.
-\newblock Sparse feature extraction for mechanistic interpretability, 2024.
-\newblock Transformer Circuits Thread.
+\bibitem[Turner et~al.(2023)Turner, Biggio, de~Masson~Tournemire, McCready, and
+  von Werra]{turner2023block}
+Alexander Turner, Leticia Biggio, David de~Masson~Tournemire, Thomas McCready,
+  and L\'eonard von Werra.
+\newblock Block logit attribution: Direct logit attribution for mechanistic
+  interpretability.
+\newblock In \emph{Transactions on Machine Learning Research}, 2023.
 
-\bibitem[Hanna et~al.(2024)Hanna, McCready, and von Werra]{hanna2024circuit}
-Michael Hanna, Thomas McCready, and L{\'e}onard von Werra.
-\newblock Circuit extraction for transformer models, 2024.
-\newblock Transformer Circuits Thread.
+\bibitem[Turpin et~al.(2023)Turpin, Michael, Henighan, and
+  Elhage]{turpin2023algorithmic}
+Michael Turpin, Jonathan Michael, Tom Henighan, and Nelson Elhage.
+\newblock Algorithmic linear interpretability of induction heads in
+  transformers.
+\newblock \emph{arXiv preprint arXiv:2307.12178}, 2023.
+
+\bibitem[Vaswani et~al.(2017)Vaswani, Shazeer, Parmar, Uszkoreit, Jones, Gomez,
+  Kaiser, and Polosukhin]{vaswani2017attention}
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones,
+  Aidan~N Gomez, {\L}ukasz Kaiser, and Illia Polosukhin.
+\newblock Attention is all you need.
+\newblock In \emph{Advances in Neural Information Processing Systems},
+  volume~30, 2017.
+
+\bibitem[Wang et~al.(2023)Wang, Luu, Chen, Turner, Varma, Nanda, and
+  Olah]{wang2023localizing}
+Kevin Wang, Anh Luu, Roger Chen, Alexander Turner, Prafulla Varma, Neel Nanda,
+  and Chris Olah.
+\newblock Localizing model behaviour: Seek and destroy.
+\newblock \emph{Transformer Circuits Thread}, 2023.
+\newblock URL \url{https://transformer-circuits.pub/}.
 
 \bibitem[Weinberger et~al.(2009)Weinberger, Dasgupta, Langford, Smola, and
   Attenberg]{weinberger2009feature}
@@ -130,10 +155,5 @@ Kilian Weinberger, Anirban Dasgupta, John Langford, Alex Smola, and Josh
 \newblock Feature hashing for large scale multitask learning.
 \newblock In \emph{Proceedings of the 26th Annual International Conference on
   Machine Learning}, pages 1113--1120, 2009.
-
-\bibitem[Cortes and Vapnik(1995)]{cortes1995support}
-Corinna Cortes and Vladimir Vapnik.
-\newblock Support-vector networks.
-\newblock \emph{Machine Learning}, 20\penalty0 (3):\penalty0 273--297, 1995.
 
 \end{thebibliography}
