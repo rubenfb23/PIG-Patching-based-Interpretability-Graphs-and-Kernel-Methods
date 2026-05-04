@@ -1,41 +1,39 @@
 model,n,representation,key,accuracy_mean,accuracy_std,dim,n_seeds
-distilgpt2,100,Coarse count,coarse_fixed_count,0.9115,0.0531,105,3
+distilgpt2,100,Coarse count,coarse_fixed_count,0.9115,0.0531,77--79,3
 distilgpt2,100,Fixed layout (binary),fixed_layout_binary_topology,0.9844,0.0128,3540,3
 distilgpt2,100,Fixed layout (signed),fixed_layout_sign_topology,1.0,0.0,3540,3
 distilgpt2,100,Fixed layout (weighted),fixed_layout_weighted,0.9948,0.0074,3540,3
-distilgpt2,100,GNN encoder,gnn_encoder_svm,0.6094,0.109,,3
+distilgpt2,100,GNN encoder,gnn_encoder_svm,0.6094,0.109,64,3
 distilgpt2,100,Graphlet shape,graphlet_shape,0.6719,0.1326,38,3
 distilgpt2,100,Hashed fixed (signed),hashed_fixed_sign,1.0,0.0,1024,3
 distilgpt2,100,Hashed fixed (weighted),hashed_fixed_weighted,0.9948,0.0074,1024,3
-distilgpt2,100,Null: edge-shuffle,null_edge_shuffle,0.4953,0.0038,,3
-distilgpt2,100,Null: weight-shuffle,null_weight_shuffle,0.5234,0.0084,,3
-distilgpt2,100,Patch-effect (raw),patch_effect_node_vector,1.0,0.0,46080,3
+distilgpt2,100,Null: edge-shuffle,null_edge_shuffle,0.4953,0.0038,3540,3
+distilgpt2,100,Null: weight-shuffle,null_weight_shuffle,0.5234,0.0084,3540,3
+distilgpt2,100,Patch-effect (raw),patch_effect_node_vector,1.0,0.0,84,3
 distilgpt2,100,Spectral shape,spectral_shape,0.5521,0.0147,96,3
 distilgpt2,100,Top-k node,topk_node_identity,0.975,0.0354,10,3
-distilgpt2,100,WL bootstrap,wl_bootstrap,0.6875,0.1295,,3
-gpt2,100,Coarse count,coarse_fixed_count,0.9271,0.0074,105,3
+distilgpt2,100,WL bootstrap,wl_bootstrap,0.6875,0.1295,8940--9059,3
+gpt2,100,Coarse count,coarse_fixed_count,0.9271,0.0074,105--112,3
 gpt2,100,Fixed layout (binary),fixed_layout_binary_topology,0.9323,0.0737,14280,3
 gpt2,100,Fixed layout (signed),fixed_layout_sign_topology,0.9896,0.0147,14280,3
 gpt2,100,Fixed layout (weighted),fixed_layout_weighted,0.8698,0.1522,14280,3
-gpt2,100,GNN encoder,gnn_encoder_svm,0.5938,0.0338,,3
+gpt2,100,GNN encoder,gnn_encoder_svm,0.5938,0.0338,64,3
 gpt2,100,Graphlet shape,graphlet_shape,0.6354,0.0849,38,3
 gpt2,100,Hashed fixed (signed),hashed_fixed_sign,0.9375,0.0338,1024,3
 gpt2,100,Hashed fixed (weighted),hashed_fixed_weighted,0.9115,0.0321,1024,3
-gpt2,100,Null: edge-shuffle,null_edge_shuffle,0.5,0.0,,3
-gpt2,100,Null: weight-shuffle,null_weight_shuffle,0.5021,0.0029,,3
-gpt2,100,Patch-effect (raw),patch_effect_node_vector,0.9583,0.0118,92160,3
+gpt2,100,Null: edge-shuffle,null_edge_shuffle,0.5,0.0,14280,3
+gpt2,100,Null: weight-shuffle,null_weight_shuffle,0.5021,0.0029,14280,3
+gpt2,100,Patch-effect (raw),patch_effect_node_vector,0.9583,0.0118,168,3
 gpt2,100,Spectral shape,spectral_shape,0.6042,0.0516,96,3
 gpt2,100,Top-k node,topk_node_identity,0.9667,0.0118,10,3
-gpt2,100,WL bootstrap,wl_bootstrap,0.7656,0.1673,,3
-gpt2,500,Coarse count,coarse_fixed_count,0.974,0.0368,105,3
+gpt2,100,WL bootstrap,wl_bootstrap,0.7656,0.1673,18520--18616,3
+gpt2,500,Coarse count,coarse_fixed_count,0.974,0.0368,96--98,3
 gpt2,500,Fixed layout (binary),fixed_layout_binary_topology,1.0,0.0,14280,3
 gpt2,500,Fixed layout (signed),fixed_layout_sign_topology,1.0,0.0,14280,3
 gpt2,500,Fixed layout (weighted),fixed_layout_weighted,1.0,0.0,14280,3
-gpt2,500,GNN encoder,gnn_encoder_svm,0.8333,0.1213,,3
+gpt2,500,GNN encoder,gnn_encoder_svm,0.8333,0.1213,64,3
 gpt2,500,Graphlet shape,graphlet_shape,0.9948,0.0074,38,3
 gpt2,500,Hashed fixed (signed),hashed_fixed_sign,1.0,0.0,1024,3
 gpt2,500,Hashed fixed (weighted),hashed_fixed_weighted,0.9583,0.0368,1024,3
-gpt2,500,Null: edge-shuffle,null_edge_shuffle,nan,nan,,3
-gpt2,500,Null: weight-shuffle,null_weight_shuffle,nan,nan,,3
 gpt2,500,Spectral shape,spectral_shape,0.9115,0.0368,96,3
-gpt2,500,WL bootstrap,wl_bootstrap,1.0,0.0,,3
+gpt2,500,WL bootstrap,wl_bootstrap,1.0,0.0,16751--16927,3

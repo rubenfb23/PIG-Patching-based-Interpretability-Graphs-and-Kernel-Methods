@@ -11,6 +11,7 @@ produces:
 from __future__ import annotations
 
 import csv
+import json
 import math
 from pathlib import Path
 from typing import Any
@@ -26,9 +27,9 @@ except ImportError:
 REPR_META: dict[str, tuple[str, int | None, str]] = {
     "patch_effect_node_vector": ("Patch-effect (raw)", None, "gold"),
     "topk_node_identity": ("Top-k node", 10, "khaki"),
-    "fixed_layout_weighted": ("Fixed layout (weighted)", 14280, "gold"),
-    "fixed_layout_binary_topology": ("Fixed layout (binary)", 14280, "orange"),
-    "fixed_layout_sign_topology": ("Fixed layout (signed)", 14280, "darkorange"),
+    "fixed_layout_weighted": ("Fixed layout (weighted)", None, "gold"),
+    "fixed_layout_binary_topology": ("Fixed layout (binary)", None, "orange"),
+    "fixed_layout_sign_topology": ("Fixed layout (signed)", None, "darkorange"),
     "wl_bootstrap": ("WL bootstrap", None, "steelblue"),
     "spectral_shape": ("Spectral shape", 96, "cornflowerblue"),
     "graphlet_shape": ("Graphlet shape", 38, "skyblue"),
@@ -60,6 +61,11 @@ CSV_TO_KEY: dict[str, str] = {
     "fixed_weighted_weight_shuffle_linear": "null_weight_shuffle",
 }
 
+METRIC_KEY_FOR_REPR: dict[str, str] = {
+    "null_edge_shuffle": "fixed_layout_weighted",
+    "null_weight_shuffle": "fixed_layout_weighted",
+}
+
 
 def read_all_summaries() -> list[dict[str, Any]]:
     """Read summaries from the primary sweep directories only (skip old fragmented runs)."""
@@ -68,7 +74,8 @@ def read_all_summaries() -> list[dict[str, Any]]:
 
     # Only include new sweeps (model_name_TIMESTAMP format) and n500 scalable
     allowed_dirs = {"gpt2_n500_res_k5_scalable_representations_20260430"}
-    for csv_path in sorted(base.glob("*/summary.csv")):
+    # Reverse sort makes newer timestamped runs win when deduplicating below.
+    for csv_path in sorted(base.glob("*/summary.csv"), reverse=True):
         model_dir = csv_path.parent.name
         model = model_dir.split("_")[0]
         if model not in {"gpt2", "distilgpt2"}:
@@ -91,6 +98,7 @@ def read_all_summaries() -> list[dict[str, Any]]:
                         break
                 row["model"] = model
                 row["n"] = n_val
+                row["_summary_dir"] = csv_path.parent
                 all_rows.append(row)
     return all_rows
 
@@ -104,19 +112,67 @@ def _fixed_layout_dim(model: str) -> int | None:
     return None
 
 
-def _patch_effect_dim(model: str) -> int | None:
-    """Return patch-effect dimension for the given model."""
-    if model == "gpt2":
-        return 768 * 120  # 768 * ~10 tokens * 12 layers
-    elif model == "distilgpt2":
-        return 768 * 60  # 768 * ~10 tokens * 6 layers
+def _load_run_json(row: dict[str, Any]) -> dict[str, Any] | None:
+    summary_dir = row.get("_summary_dir")
+    run_key = row.get("run_key")
+    if not summary_dir or not run_key:
+        return None
+    run_path = Path(summary_dir) / "runs" / f"{run_key}.json"
+    if not run_path.exists():
+        return None
+    with open(run_path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _dimension_from_run(row: dict[str, Any], internal_key: str) -> int | None:
+    """Read feature dimensionality from the per-seed JSON whenever available."""
+    run = _load_run_json(row)
+    metric_key = METRIC_KEY_FOR_REPR.get(internal_key, internal_key)
+    metric = (run or {}).get("paper_decision", {}).get("metrics", {}).get(metric_key, {})
+    linear_metric = metric.get("linear", {})
+    dim = linear_metric.get("num_features", linear_metric.get("embedding_dim"))
+    if isinstance(dim, int):
+        return dim
+
+    base_dim = REPR_META.get(internal_key, (internal_key, None, "gray"))[1]
+    if base_dim is not None:
+        return base_dim
+    if internal_key.startswith("fixed_layout") or internal_key.startswith("null_"):
+        return _fixed_layout_dim(str(row.get("model", "")))
+    return None
+
+
+def _aggregate_dim(dims: list[int]) -> int | str | None:
+    if not dims:
+        return None
+    unique_dims = sorted(set(dims))
+    if len(unique_dims) == 1:
+        return unique_dims[0]
+    return f"{unique_dims[0]}--{unique_dims[-1]}"
+
+
+def _format_dim(dim: int | str | None) -> str:
+    if dim is None:
+        return "---"
+    if isinstance(dim, int):
+        return f"{dim:,}"
+    return dim
+
+
+def _numeric_dim(dim: int | str | None) -> float | None:
+    if isinstance(dim, int):
+        return float(dim)
+    if isinstance(dim, str) and "--" in dim:
+        low, high = dim.split("--", maxsplit=1)
+        if low.isdigit() and high.isdigit():
+            return (float(low) + float(high)) / 2
     return None
 
 
 def aggregate(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Aggregate across seeds. Deduplicates by (model, n, seed) keeping only the first
     occurrence per seed (so newer sweep results take priority over older runs)."""
-    groups: dict[tuple, list[float]] = {}
+    groups: dict[tuple, list[tuple[float, int | None]]] = {}
     seen_seeds: set[tuple] = set()
     for row in rows:
         model = row["model"]
@@ -133,19 +189,19 @@ def aggregate(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if not acc_str:
                 continue
             acc = float(acc_str)
-            groups.setdefault((model, n, internal_key), []).append(acc)
+            if not math.isfinite(acc):
+                continue
+            dim = _dimension_from_run(row, internal_key)
+            groups.setdefault((model, n, internal_key), []).append((acc, dim))
 
     results = []
-    for (model, n, key), accs in sorted(groups.items()):
+    for (model, n, key), values in sorted(groups.items()):
+        accs = [acc for acc, _ in values]
+        dims = [dim for _, dim in values if dim is not None]
         mean_val = sum(accs) / len(accs)
         std_val = (sum((a - mean_val) ** 2 for a in accs) / len(accs)) ** 0.5
         base_meta = REPR_META.get(key, (key, None, "gray"))
-        base_dim = base_meta[1]
-        # Override fixed_layout dim from model, not hardcoding
-        if key.startswith("fixed_layout"):
-            base_dim = _fixed_layout_dim(model)
-        if key == "patch_effect_node_vector":
-            base_dim = _patch_effect_dim(model)
+        dim = _aggregate_dim(dims)
         results.append({
             "model": model,
             "n": n,
@@ -153,7 +209,7 @@ def aggregate(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "key": key,
             "accuracy_mean": round(mean_val, 4),
             "accuracy_std": round(std_val, 4),
-            "dim": base_dim,
+            "dim": dim,
             "n_seeds": len(accs),
         })
     return results
@@ -163,7 +219,7 @@ def write_csv(results: list[dict[str, Any]], path: Path) -> None:
     fieldnames = ["model", "n", "representation", "key", "accuracy_mean",
                   "accuracy_std", "dim", "n_seeds"]
     with open(path, "w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer = csv.DictWriter(fh, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
         for r in results:
             writer.writerow(r)
@@ -177,7 +233,7 @@ def write_markdown(results: list[dict[str, Any]], path: Path) -> None:
         lines.append("| Representation | Accuracy | Std | Dim |")
         lines.append("|---|---|---|---|")
         for r in sorted(group, key=lambda x: -x["accuracy_mean"]):
-            dim_str = f"{r['dim']:,}" if r["dim"] else "---"
+            dim_str = _format_dim(r["dim"])
             lines.append(f"| {r['representation']} | {r['accuracy_mean']:.4f} | "
                          f"{r['accuracy_std']:.4f} | {dim_str} |")
         lines.append("")
@@ -206,15 +262,17 @@ def plot_pareto(results: list[dict[str, Any]], path: Path) -> None:
 
     for model in models:
         model_results = [r for r in results if r["model"] == model]
-        x, y = [], []
+        x, y, plotted = [], [], []
         for r in model_results:
-            if r["dim"] is not None and r["dim"] > 0:
-                x.append(math.log10(r["dim"]))
+            dim = _numeric_dim(r["dim"])
+            if dim is not None and dim > 0:
+                x.append(math.log10(dim))
                 y.append(r["accuracy_mean"])
+                plotted.append(r)
         ax.scatter(x, y, c=colors.get(model, "gray"),
                    marker=markers.get(model, "o"), s=80,
                    label=f"{model}", alpha=0.7, edgecolors="black", linewidth=0.5)
-        for xi, yi, r in zip(x, y, model_results):
+        for xi, yi, r in zip(x, y, plotted):
             ax.annotate(r["representation"], (xi, yi),
                         textcoords="offset points", xytext=(5, 3), fontsize=7,
                         color=colors.get(model, "gray"))
@@ -222,13 +280,10 @@ def plot_pareto(results: list[dict[str, Any]], path: Path) -> None:
     # Connect by n for GPT-2
     gpt2 = [r for r in results if r["model"] == "gpt2"]
     for n in sorted(set(r["n"] for r in gpt2)):
-        n_data = [r for r in gpt2 if r["n"] == n and r["dim"] is not None and r["dim"] > 0]
+        n_data = [r for r in gpt2 if r["n"] == n and (_numeric_dim(r["dim"]) or 0) > 0]
         if len(n_data) >= 2:
-            xs = [r["accuracy_mean"] for r in sorted(n_data, key=lambda x: -math.log10(x["dim"]))]
-            ys = sorted([math.log10(r["dim"]) for r in n_data], reverse=True)
-            # Use dim as x-axis
-            gpt2_n = sorted(n_data, key=lambda x: -math.log10(x["dim"]))
-            ax.plot([math.log10(r["dim"]) for r in gpt2_n],
+            gpt2_n = sorted(n_data, key=lambda x: -math.log10(_numeric_dim(x["dim"]) or 1))
+            ax.plot([math.log10(_numeric_dim(r["dim"]) or 1) for r in gpt2_n],
                     [r["accuracy_mean"] for r in gpt2_n],
                     "--", c="gray", alpha=0.3, linewidth=0.8)
 
@@ -275,7 +330,7 @@ def main() -> None:
     for (model, n), group in _group_by_model_n(results):
         print(f"\n=== {model} n={n} ===")
         for r in sorted(group, key=lambda x: -x["accuracy_mean"]):
-            dim_str = f"{r['dim']:,}" if r["dim"] else "---"
+            dim_str = _format_dim(r["dim"])
             print(f"  {r['representation']:30s} {r['accuracy_mean']:.4f} +/- {r['accuracy_std']:.4f}  D={dim_str}")
 
 
