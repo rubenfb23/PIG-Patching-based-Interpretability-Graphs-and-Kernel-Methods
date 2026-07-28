@@ -261,3 +261,18 @@ web/tsconfig.tsbuildinfo
 *.toc
 *.vrb
 *.xdv
+
+# LaTeX sources, bibliographies, classes, and packages
+*.tex
+*.ltx
+*.bib
+*.bst
+*.sty
+*.cls
+*.clo
+*.dtx
+*.ins
+*.bbx
+*.cbx
+*.lbx
+latexmkrc
