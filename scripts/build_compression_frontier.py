@@ -254,7 +254,7 @@ def plot_pareto(results: list[dict[str, Any]], path: Path) -> None:
         )
         return
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(11, 6.5))
 
     models = sorted(set(r["model"] for r in results))
     colors = {"gpt2": "steelblue", "distilgpt2": "green", "toy_transformer": "gold"}
@@ -272,9 +272,23 @@ def plot_pareto(results: list[dict[str, Any]], path: Path) -> None:
         ax.scatter(x, y, c=colors.get(model, "gray"),
                    marker=markers.get(model, "o"), s=80,
                    label=f"{model}", alpha=0.7, edgecolors="black", linewidth=0.5)
+        label_offsets = {
+            "WL bootstrap": ("WL", (6, 6)),
+            "Fixed layout (signed)": ("Fixed sign", (6, -10)),
+            "Hashed fixed (signed)": ("Hashed sign", (6, -10)),
+            "Coarse count": ("Coarse", (6, 7)),
+            "Spectral shape": ("Spectral", (6, -12)),
+            "Graphlet shape": ("Graphlet", (6, 7)),
+        }
         for xi, yi, r in zip(x, y, plotted):
-            ax.annotate(r["representation"], (xi, yi),
-                        textcoords="offset points", xytext=(5, 3), fontsize=7,
+            if not (r["model"] == "gpt2" and r["n"] == 100):
+                continue
+            name = str(r["representation"])
+            if name not in label_offsets:
+                continue
+            label, (dx, dy) = label_offsets[name]
+            ax.annotate(label, (xi, yi),
+                        textcoords="offset points", xytext=(dx, dy), fontsize=7.5,
                         color=colors.get(model, "gray"))
 
     # Connect by n for GPT-2
@@ -295,7 +309,7 @@ def plot_pareto(results: list[dict[str, Any]], path: Path) -> None:
     ax.set_xlim(left=-1)
 
     plt.tight_layout()
-    fig.savefig(str(path), dpi=150, bbox_inches="tight")
+    fig.savefig(str(path), dpi=220, bbox_inches="tight")
     plt.close(fig)
 
 

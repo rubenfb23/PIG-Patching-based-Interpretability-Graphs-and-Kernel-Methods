@@ -314,6 +314,7 @@ class TestGraphBuilderRegistry:
         names = get_available_graph_builders()
         assert "correlation_topk" in names
         assert "abs_correlation_topk" in names
+        assert "partial_correlation_topk" in names
 
     def test_create_graph_builder(self, registry_dataset):
         builder = create_graph_builder("correlation_topk", k=3, enforce_direction=True)
@@ -329,6 +330,22 @@ class TestGraphBuilderRegistry:
         graph = builder.build_from_slice(registry_dataset, slice_label)
         assert graph.num_edges > 0
 
+    def test_partial_correlation_builder(self, registry_dataset):
+        builder = create_graph_builder(
+            "partial_correlation_topk",
+            k=3,
+            enforce_direction=True,
+        )
+        slice_label = SliceLabel(task="ioi", corruption="name_swap")
+        graph = builder.build_from_slice(registry_dataset, slice_label)
+
+        assert graph.num_edges > 0
+        assert graph.metadata["graph_builder"] == "PartialCorrelationGraphBuilder"
+        assert graph.metadata["construction_mode"] == "slice_partial_correlation"
+        assert graph.metadata["ridge"] == pytest.approx(1e-3)
+        for edge in graph.edges:
+            assert graph.nodes[edge.src] < graph.nodes[edge.dst]
+
     def test_create_unknown_builder_raises(self):
         with pytest.raises(ValueError, match="Unknown graph builder"):
             create_graph_builder("does_not_exist")
@@ -336,11 +353,19 @@ class TestGraphBuilderRegistry:
     def test_build_graphs_for_builders(self, registry_dataset):
         collections = build_graphs_for_builders(
             registry_dataset,
-            builder_names=["correlation_topk", "abs_correlation_topk"],
+            builder_names=[
+                "correlation_topk",
+                "abs_correlation_topk",
+                "partial_correlation_topk",
+            ],
             k=3,
             enforce_direction=True,
         )
-        assert set(collections) == {"correlation_topk", "abs_correlation_topk"}
+        assert set(collections) == {
+            "correlation_topk",
+            "abs_correlation_topk",
+            "partial_correlation_topk",
+        }
 
         slice_label = SliceLabel(task="ioi", corruption="name_swap")
         for builder_name, graphs in collections.items():

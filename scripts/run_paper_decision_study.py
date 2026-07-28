@@ -37,7 +37,7 @@ from pig.graph import (
 from pig.graph_features import apply_null_control_to_graphs
 from pig.model import create_model
 from pig.patching import PatchEffectDataset, compute_patch_effects
-from pig.prompts import SliceLabel, create_ioi_dataset
+from pig.prompts import SliceLabel, create_induction_dataset, create_ioi_dataset
 
 
 @dataclass
@@ -713,6 +713,58 @@ def _graphlet_matrix(
     return MatrixBundle(X=matrix, y=labels, feature_names=feature_names)
 
 
+def _surface_cue_matrix(
+    tensors: Sequence,
+    *,
+    feature_names: list[str] | None = None,
+) -> MatrixBundle:
+    """Prompt-only control for corruption-level surface cues.
+
+    These features intentionally ignore model activations. They test whether the
+    corruption label can be recovered from simple string-level facts about the
+    corrupted prompt, such as target/distractor presence and counts.
+    """
+    tensor_list = list(tensors)
+    labels = [tensor.prompt_pair.slice_label for tensor in tensor_list]
+    default_names = [
+        "target_count_in_corrupted",
+        "distractor_count_in_corrupted",
+        "target_present_in_corrupted",
+        "distractor_present_in_corrupted",
+        "corrupted_prompt_num_chars",
+        "corrupted_prompt_num_words",
+    ]
+    if feature_names is None:
+        feature_names = default_names
+
+    matrix = np.zeros((len(tensor_list), len(feature_names)), dtype=np.float32)
+    feature_index = {name: idx for idx, name in enumerate(feature_names)}
+
+    for row_idx, tensor in enumerate(tensor_list):
+        pair = tensor.prompt_pair
+        corrupted = pair.x_crp
+        target = pair.y_star
+        distractor = pair.meta.get("y_distractor", "")
+        values = {
+            "target_count_in_corrupted": float(corrupted.count(target)),
+            "distractor_count_in_corrupted": (
+                float(corrupted.count(distractor)) if isinstance(distractor, str) and distractor else 0.0
+            ),
+            "target_present_in_corrupted": float(target in corrupted),
+            "distractor_present_in_corrupted": (
+                float(distractor in corrupted) if isinstance(distractor, str) and distractor else 0.0
+            ),
+            "corrupted_prompt_num_chars": float(len(corrupted)),
+            "corrupted_prompt_num_words": float(len(corrupted.split())),
+        }
+        for name, value in values.items():
+            col_idx = feature_index.get(name)
+            if col_idx is not None:
+                matrix[row_idx, col_idx] = np.float32(value)
+
+    return MatrixBundle(X=matrix, y=labels, feature_names=feature_names)
+
+
 def _fit_eval_svm(
     train: MatrixBundle,
     test: MatrixBundle,
@@ -859,6 +911,16 @@ def _evaluate_seed(
         for kernel in ("linear", "rbf")
     }
 
+    surface_train = _surface_cue_matrix(train_tensors)
+    surface_test = _surface_cue_matrix(
+        test_tensors,
+        feature_names=surface_train.feature_names,
+    )
+    result["metrics"]["surface_cue_control"] = {
+        kernel: _fit_eval_svm(surface_train, surface_test, kernel=kernel, seed=seed)
+        for kernel in ("linear", "rbf")
+    }
+
     wl_train = _wl_matrix(train_graphs, depth=wl_depth)
     wl_test = _wl_matrix(test_graphs, depth=wl_depth, vocabulary=wl_train.feature_names)
     result["metrics"]["wl_bootstrap"] = {
@@ -976,6 +1038,8 @@ def _write_summary(path: Path, rows: list[dict]) -> None:
         "patch_effect_rbf",
         "topk_node_linear",
         "topk_node_rbf",
+        "surface_cue_linear",
+        "surface_cue_rbf",
         "hashed_sign_linear",
         "hashed_sign_rbf",
         "hashed_weighted_linear",
@@ -1000,12 +1064,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--model-name", default="toy_transformer")
     parser.add_argument("--device", default=None)
+    parser.add_argument(
+        "--task",
+        default="ioi",
+        choices=["ioi", "induction"],
+        help="Task type. 'ioi' uses create_ioi_dataset; 'induction' uses create_induction_dataset.",
+    )
     parser.add_argument("--corruptions", default="name_swap,abba")
     parser.add_argument("--seeds", default="7,42,123")
     parser.add_argument("--k-grid", default="5")
     parser.add_argument("--num-examples-grid", default="100")
     parser.add_argument("--node-types-grid", default="res")
     parser.add_argument("--graph-builder", default="correlation_topk")
+    parser.add_argument(
+        "--free-direction",
+        action="store_true",
+        help="Disable the graph direction constraint for direction ablations.",
+    )
     parser.add_argument("--train-fraction", type=float, default=0.8)
     parser.add_argument("--graphs-per-slice", type=int, default=32)
     parser.add_argument("--bootstrap-sample-fraction", type=float, default=0.75)
@@ -1063,9 +1138,14 @@ def main() -> None:
                     )
                     print(f"Running {run_key}")
                     prompt_pairs = []
+                    _dataset_fn = (
+                        create_induction_dataset
+                        if args.task == "induction"
+                        else create_ioi_dataset
+                    )
                     for offset, corruption in enumerate(corruptions):
                         prompt_pairs.extend(
-                            create_ioi_dataset(
+                            _dataset_fn(
                                 n_examples=num_examples,
                                 corruption=corruption,
                                 seed=seed + offset * 10_000,
@@ -1087,7 +1167,7 @@ def main() -> None:
                     builder = create_graph_builder(
                         args.graph_builder,
                         k=k,
-                        enforce_direction=True,
+                        enforce_direction=not args.free_direction,
                     )
                     result = _evaluate_seed(
                         dataset=dataset,
@@ -1125,6 +1205,8 @@ def main() -> None:
                         "max_tokens": max_tokens,
                         "hashed_dim": args.hashed_dim,
                         "topk_nodes": args.topk_nodes,
+                        "enforce_direction": not args.free_direction,
+                        "graph_builder": args.graph_builder,
                         "gnn_encoder_config": {
                             "hidden_dim": args.gnn_hidden_dim,
                             "num_layers": args.gnn_layers,
@@ -1192,6 +1274,12 @@ def main() -> None:
                                 "linear"
                             ]["accuracy"],
                             "topk_node_rbf": metrics["topk_node_identity"]["rbf"][
+                                "accuracy"
+                            ],
+                            "surface_cue_linear": metrics["surface_cue_control"][
+                                "linear"
+                            ]["accuracy"],
+                            "surface_cue_rbf": metrics["surface_cue_control"]["rbf"][
                                 "accuracy"
                             ],
                             "hashed_sign_linear": metrics["hashed_fixed_sign"][

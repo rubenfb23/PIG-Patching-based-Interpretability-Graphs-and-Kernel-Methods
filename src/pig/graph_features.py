@@ -82,6 +82,106 @@ def compute_fixed_layout_features_from_list(
     )
 
 
+_DIRECTED_TRIAD_NAMES = (
+    "003",
+    "012",
+    "102",
+    "021D",
+    "021U",
+    "021C",
+    "111D",
+    "111U",
+    "030T",
+    "030C",
+    "201",
+    "120D",
+    "120U",
+    "120C",
+    "210",
+    "300",
+)
+
+
+def _degree_summary(values: NDArray[np.float64]) -> tuple[float, float, float]:
+    if values.size == 0:
+        return 0.0, 0.0, 0.0
+    return float(np.mean(values)), float(np.std(values)), float(np.max(values))
+
+
+def compute_directed_motif_features_from_list(
+    graphs_with_labels: list[tuple[PatchInfluenceGraph, SliceLabel]],
+) -> FixedLayoutFeatureMatrix:
+    """Vectorize directed graphs using triad motifs and signed degree summaries.
+
+    The 16 directed triad-census counts are normalized by the number of node
+    triplets. Remaining features summarize positive/negative edge fractions
+    and signed in/out-degree distributions. Unlike fixed edge slots, this
+    representation is invariant to node ordering and absolute node identity.
+    """
+    import networkx as nx
+
+    feature_names = [f"triad_{name}" for name in _DIRECTED_TRIAD_NAMES]
+    feature_names.extend(["positive_edge_fraction", "negative_edge_fraction"])
+    for sign in ("all", "positive", "negative"):
+        for direction in ("in", "out"):
+            for statistic in ("mean", "std", "max"):
+                feature_names.append(f"{sign}_{direction}_degree_{statistic}")
+
+    matrix = np.zeros(
+        (len(graphs_with_labels), len(feature_names)),
+        dtype=np.float32,
+    )
+    slice_labels = [label for _, label in graphs_with_labels]
+
+    for row_idx, (graph, _) in enumerate(graphs_with_labels):
+        directed = nx.DiGraph()
+        directed.add_nodes_from(range(graph.num_nodes))
+        directed.add_edges_from(
+            (int(edge.src), int(edge.dst))
+            for edge in graph.edges
+            if edge.src != edge.dst and np.isfinite(edge.weight)
+        )
+        census = nx.triadic_census(directed)
+        triplets = max(graph.num_nodes * (graph.num_nodes - 1) * (graph.num_nodes - 2) / 6, 1)
+        for col_idx, name in enumerate(_DIRECTED_TRIAD_NAMES):
+            matrix[row_idx, col_idx] = np.float32(census.get(name, 0) / triplets)
+
+        finite_edges = [edge for edge in graph.edges if np.isfinite(edge.weight)]
+        edge_count = max(len(finite_edges), 1)
+        matrix[row_idx, 16] = np.float32(
+            sum(edge.weight > 0 for edge in finite_edges) / edge_count
+        )
+        matrix[row_idx, 17] = np.float32(
+            sum(edge.weight < 0 for edge in finite_edges) / edge_count
+        )
+
+        degree_vectors: list[NDArray[np.float64]] = []
+        for predicate in (
+            lambda edge: True,
+            lambda edge: edge.weight > 0,
+            lambda edge: edge.weight < 0,
+        ):
+            in_degree = np.zeros(graph.num_nodes, dtype=np.float64)
+            out_degree = np.zeros(graph.num_nodes, dtype=np.float64)
+            for edge in finite_edges:
+                if predicate(edge):
+                    out_degree[int(edge.src)] += 1.0
+                    in_degree[int(edge.dst)] += 1.0
+            degree_vectors.extend((in_degree, out_degree))
+
+        col_idx = 18
+        for values in degree_vectors:
+            for statistic in _degree_summary(values):
+                matrix[row_idx, col_idx] = np.float32(statistic)
+                col_idx += 1
+
+    return FixedLayoutFeatureMatrix(
+        matrix=matrix,
+        feature_names=feature_names,
+        slice_labels=slice_labels,
+    )
+
+
 def apply_null_control_to_graphs(
     graphs_with_labels: list[tuple[PatchInfluenceGraph, SliceLabel]],
     control: NullControl,
@@ -480,7 +580,7 @@ def compute_hashed_fixed_layout_features(
     accumulation (positive edges add +1, negative edges add -1).
     NaN edge weights (from zero-variance nodes) are excluded.
     """
-    rng = np.random.default_rng(seed)
+    _ = seed
     # Generate a stable hash offset for each possible edge slot
     slice_labels = [label for _, label in graphs_with_labels]
     feature_names = [f"hash_{i}" for i in range(dim)]
@@ -574,4 +674,68 @@ def compute_coarse_count_features(
                 break
     return FixedLayoutFeatureMatrix(
         matrix=matrix, feature_names=feature_names, slice_labels=slice_labels
+    )
+
+
+# ---- Dimensionality control: PCA and Random Projection ----
+
+def compute_pca_projected_features(
+    graphs_with_labels: list[tuple["PatchInfluenceGraph", "SliceLabel"]],
+    target_dim: int = 96,
+    seed: int = 42,
+) -> FixedLayoutFeatureMatrix:
+    """PCA projection of fixed-layout features to target dimension.
+
+    Projects the full fixed-layout feature matrix to target_dim using
+    PCA, yielding a compressed representation for fair comparison
+    against spectral_shape and other low-dim baselines.
+    """
+    from sklearn.decomposition import PCA
+
+    slice_labels = [label for _, label in graphs_with_labels]
+
+    # First get full fixed-layout features
+    base = compute_fixed_layout_features_from_list(graphs_with_labels)
+    X = base.matrix.copy()  # (n_graphs, n_features)
+
+    # Fit PCA and transform — cap components by both feature dim and sample count
+    n_samples, n_features = X.shape
+    n_components = min(target_dim, n_features, n_samples)
+    if n_components == 0:
+        raise ValueError(f"Cannot run PCA: need at least 1 sample and 1 feature, got n_samples={n_samples}, n_features={n_features}")
+    pca = PCA(n_components=n_components, random_state=seed)
+    projected = pca.fit_transform(X).astype(np.float32)
+
+    feature_names = [f"pca_{i}" for i in range(projected.shape[1])]
+    return FixedLayoutFeatureMatrix(
+        matrix=projected, feature_names=feature_names, slice_labels=slice_labels,
+    )
+
+
+def compute_random_projection_features(
+    graphs_with_labels: list[tuple["PatchInfluenceGraph", "SliceLabel"]],
+    target_dim: int = 96,
+    seed: int = 42,
+) -> FixedLayoutFeatureMatrix:
+    """Random projection of fixed-layout features to target dimension.
+
+    Uses Gaussian random projection to map the full fixed-layout
+    feature space to target_dim dimensions. Preserves pairwise distances
+    approximately (Johnson-Lindenstrauss lemma).
+    """
+    from sklearn.random_projection import GaussianRandomProjection
+
+    slice_labels = [label for _, label in graphs_with_labels]
+
+    # First get full fixed-layout features
+    base = compute_fixed_layout_features_from_list(graphs_with_labels)
+    X = base.matrix.copy()
+
+    # Fit random projection and transform
+    rp = GaussianRandomProjection(n_components=target_dim, random_state=seed)
+    projected = rp.fit_transform(X).astype(np.float32)
+
+    feature_names = [f"rp_{i}" for i in range(projected.shape[1])]
+    return FixedLayoutFeatureMatrix(
+        matrix=projected, feature_names=feature_names, slice_labels=slice_labels,
     )

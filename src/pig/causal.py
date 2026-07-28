@@ -25,6 +25,7 @@ from pig.graph import Node
 from pig.model import (
     ALLOWED_NODE_TYPES,
     NODE_TYPE_ATT,
+    NODE_TYPE_RES,
     ActivationCache,
     HookedModel,
 )
@@ -1061,6 +1062,220 @@ def propose_lowrank_edge_candidates(
             )
         )
     return candidates
+
+
+def _candidate_from_nodes(
+    *,
+    rank: int,
+    score: float,
+    src: Node,
+    dst: Node,
+) -> CausalEdgeCandidate:
+    return CausalEdgeCandidate(
+        src_layer=src.layer,
+        src_token=src.token,
+        src_node_type=src.node_type,
+        src_head=src.head,
+        dst_layer=dst.layer,
+        dst_token=dst.token,
+        dst_node_type=dst.node_type,
+        dst_head=dst.head,
+        correlation_score=score,
+        rank=rank,
+    )
+
+
+def _effect_feature_matrix(
+    tensors: Sequence[PatchEffectTensor],
+    *,
+    eps: float,
+) -> tuple[NDArray[np.float64], list[Node]]:
+    component_axis = tensors[0].component_axis
+    num_layers = tensors[0].num_layers
+    min_tokens = min(t.num_tokens for t in tensors)
+    num_components = len(component_axis)
+
+    rows: list[NDArray[np.float64]] = []
+    for tensor in tensors:
+        delta = max(float(tensor.clean_score - tensor.base_score), eps)
+        normalized = tensor.effects[:, :min_tokens, :] / delta
+        rows.append(normalized.reshape(-1).astype(np.float64, copy=False))
+
+    nodes = [
+        Node.from_index(i, num_tokens=min_tokens, component_axis=component_axis)
+        for i in range(num_layers * min_tokens * num_components)
+    ]
+    return np.stack(rows, axis=0), nodes
+
+
+def _valid_edge_indices(
+    nodes: Sequence[Node],
+    *,
+    node_types: Sequence[str],
+    enforce_direction: bool,
+) -> list[tuple[int, int]]:
+    allowed_types = set(node_types)
+    valid_nodes = [
+        index for index, node in enumerate(nodes) if node.node_type in allowed_types
+    ]
+    edge_indices: list[tuple[int, int]] = []
+    for src_idx in valid_nodes:
+        src = nodes[src_idx]
+        for dst_idx in valid_nodes:
+            if src_idx == dst_idx:
+                continue
+            dst = nodes[dst_idx]
+            if enforce_direction and not (src < dst):
+                continue
+            if (
+                src.node_type == NODE_TYPE_ATT
+                and dst.node_type == NODE_TYPE_ATT
+                and src.layer == dst.layer
+            ):
+                continue
+            edge_indices.append((src_idx, dst_idx))
+    return edge_indices
+
+
+def _ranked_edges_from_scores(
+    scores: NDArray[np.float64],
+    nodes: Sequence[Node],
+    valid_edges: Sequence[tuple[int, int]],
+    *,
+    num_edges: int,
+    reverse: bool,
+    excluded_edge_ids: set[str] | None = None,
+) -> list[CausalEdgeCandidate]:
+    excluded = excluded_edge_ids or set()
+    ranked: list[tuple[float, float, int, int]] = []
+    for src_idx, dst_idx in valid_edges:
+        score = float(scores[src_idx, dst_idx])
+        if not np.isfinite(score):
+            continue
+        ranked.append((abs(score), score, src_idx, dst_idx))
+    if reverse:
+        ranked.sort(key=lambda item: (-item[0], -abs(item[1]), item[2], item[3]))
+    else:
+        ranked.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+
+    candidates: list[CausalEdgeCandidate] = []
+    for _, score, src_idx, dst_idx in ranked:
+        candidate = _candidate_from_nodes(
+            rank=len(candidates) + 1,
+            score=score,
+            src=nodes[src_idx],
+            dst=nodes[dst_idx],
+        )
+        if candidate.edge_id() in excluded:
+            continue
+        candidates.append(candidate)
+        if len(candidates) >= num_edges:
+            break
+    return candidates
+
+
+def propose_partial_correlation_edge_candidates(
+    tensors: Sequence[PatchEffectTensor],
+    num_edges: int = 5,
+    node_types: Sequence[str] = (NODE_TYPE_RES,),
+    enforce_direction: bool = True,
+    eps: float = 1e-6,
+    ridge: float = 1e-3,
+) -> list[CausalEdgeCandidate]:
+    """Propose candidate edges from ridge-regularized partial correlations."""
+    if not tensors or num_edges <= 0:
+        return []
+    for node_type in node_types:
+        _validate_node_type(node_type)
+
+    matrix, nodes = _effect_feature_matrix(tensors, eps=eps)
+    centered = matrix - matrix.mean(axis=0, keepdims=True)
+    denom = max(centered.shape[0] - 1, 1)
+    covariance = (centered.T @ centered) / denom
+    scale = float(np.trace(covariance) / max(covariance.shape[0], 1))
+    covariance = covariance + np.eye(covariance.shape[0]) * max(scale * ridge, ridge)
+    precision = np.linalg.pinv(covariance)
+    diag = np.sqrt(np.maximum(np.diag(precision), eps))
+    partial = -precision / np.maximum(np.outer(diag, diag), eps)
+    np.fill_diagonal(partial, 0.0)
+
+    valid_edges = _valid_edge_indices(
+        nodes,
+        node_types=node_types,
+        enforce_direction=enforce_direction,
+    )
+    return _ranked_edges_from_scores(
+        partial,
+        nodes,
+        valid_edges,
+        num_edges=num_edges,
+        reverse=True,
+    )
+
+
+def propose_causal_candidate_groups(
+    tensors: Sequence[PatchEffectTensor],
+    num_edges: int = 5,
+    node_types: Sequence[str] = (NODE_TYPE_RES,),
+    enforce_direction: bool = True,
+    eps: float = 1e-6,
+    seed: int = 42,
+) -> dict[str, list[CausalEdgeCandidate]]:
+    """Return disjoint CI/PC/null candidate groups for DI validation."""
+    if not tensors or num_edges <= 0:
+        return {"top_ci": [], "top_pc": [], "random": [], "lowrank": []}
+
+    for node_type in node_types:
+        _validate_node_type(node_type)
+
+    groups: dict[str, list[CausalEdgeCandidate]] = {}
+    used: set[str] = set()
+
+    top_ci = propose_causal_edge_candidates(
+        tensors,
+        num_edges=num_edges,
+        node_types=node_types,
+        enforce_direction=enforce_direction,
+        eps=eps,
+    )
+    groups["top_ci"] = top_ci
+    used.update(edge.edge_id() for edge in top_ci)
+
+    pc_pool = propose_partial_correlation_edge_candidates(
+        tensors,
+        num_edges=max(num_edges * 4, num_edges),
+        node_types=node_types,
+        enforce_direction=enforce_direction,
+        eps=eps,
+    )
+    groups["top_pc"] = [edge for edge in pc_pool if edge.edge_id() not in used][
+        :num_edges
+    ]
+    used.update(edge.edge_id() for edge in groups["top_pc"])
+
+    random_pool = propose_random_edge_candidates(
+        tensors,
+        num_edges=max(num_edges * 10, num_edges),
+        node_types=node_types,
+        enforce_direction=enforce_direction,
+        seed=seed,
+    )
+    groups["random"] = [edge for edge in random_pool if edge.edge_id() not in used][
+        :num_edges
+    ]
+    used.update(edge.edge_id() for edge in groups["random"])
+
+    lowrank_pool = propose_lowrank_edge_candidates(
+        tensors,
+        num_edges=max(num_edges * 10, num_edges),
+        node_types=node_types,
+        enforce_direction=enforce_direction,
+        eps=eps,
+    )
+    groups["lowrank"] = [edge for edge in lowrank_pool if edge.edge_id() not in used][
+        :num_edges
+    ]
+    return groups
 
 
 def evaluate_causal_edges(

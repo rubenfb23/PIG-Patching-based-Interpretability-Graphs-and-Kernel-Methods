@@ -7,6 +7,7 @@ from pig.prompts import (
     IOIGenerator,
     NameSwapCorruption,
     PromptPair,
+    SecondSubjectSwapCorruption,
     SliceLabel,
     create_ioi_dataset,
     get_prompt_pair_distractor,
@@ -119,6 +120,42 @@ class TestABBACorruption:
         corrupted = corruption.corrupt(clean, meta)
         # After swap: Mary is now S, John is now IO
         assert corrupted == "Mary gave the book to John. John gave it back to"
+
+
+class TestSecondSubjectSwapCorruption:
+    """Tests for the surface-balanced second-subject swap corruption."""
+
+    def test_name_property(self):
+        corruption = SecondSubjectSwapCorruption()
+        assert corruption.name == "second_subject_swap"
+
+    def test_corrupt(self):
+        corruption = SecondSubjectSwapCorruption()
+        meta = {
+            "name_s": "John",
+            "name_io": "Mary",
+            "template": "{S} gave the book to {IO}. {IO} gave it back to",
+        }
+        clean = "John gave the book to Mary. Mary gave it back to"
+        corrupted = corruption.corrupt(clean, meta)
+
+        assert corrupted == "John gave the book to Mary. John gave it back to"
+        assert corrupted.count("John") == 2
+        assert corrupted.count("Mary") == 1
+
+    def test_name_counts_match_abba(self):
+        meta = {
+            "name_s": "John",
+            "name_io": "Mary",
+            "template": "{S} gave the book to {IO}. {IO} gave it back to",
+        }
+        clean = "John gave the book to Mary. Mary gave it back to"
+
+        abba = ABBACorruption().corrupt(clean, meta)
+        balanced = SecondSubjectSwapCorruption().corrupt(clean, meta)
+
+        assert abba.count("John") == balanced.count("John") == 2
+        assert abba.count("Mary") == balanced.count("Mary") == 1
 
 
 class TestIOIGenerator:
@@ -254,6 +291,13 @@ class TestIOIGenerator:
 
         assert pair.slice_label.corruption == "abba"
 
+    def test_second_subject_swap_corruption(self):
+        """Test with surface-balanced second-subject swap corruption."""
+        gen = IOIGenerator(corruption=SecondSubjectSwapCorruption(), seed=42)
+        pair = gen.generate()
+
+        assert pair.slice_label.corruption == "second_subject_swap"
+
 
 class TestCreateIOIDataset:
     """Tests for create_ioi_dataset convenience function."""
@@ -274,6 +318,17 @@ class TestCreateIOIDataset:
         """Test with abba corruption."""
         dataset = create_ioi_dataset(n_examples=10, corruption="abba", seed=42)
         assert all(p.slice_label.corruption == "abba" for p in dataset)
+
+    def test_second_subject_swap_corruption(self):
+        """Test with second_subject_swap corruption."""
+        dataset = create_ioi_dataset(
+            n_examples=10,
+            corruption="second_subject_swap",
+            seed=42,
+        )
+        assert all(
+            p.slice_label.corruption == "second_subject_swap" for p in dataset
+        )
 
     def test_invalid_corruption_raises(self):
         """Test that invalid corruption type raises error."""

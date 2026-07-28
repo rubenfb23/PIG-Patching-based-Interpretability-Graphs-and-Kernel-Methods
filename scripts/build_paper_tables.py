@@ -399,3 +399,617 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# ---- ---- ---- ---- ---- ---- ----
+# NeurIPS revision mode extensions
+# ---- ---- ---- ---- ---- ---- ----
+
+def compute_statistical_tests(values_a: list[float], values_b: list[float], seed: int = 42) -> dict:
+    """Compute Wilcoxon signed-rank test and bootstrap CI between two sets of values.
+
+    Args:
+        values_a: Accuracy values for method A (e.g., fixed_layout_signed).
+        values_b: Accuracy values for method B (e.g., PCA projected).
+        seed: Random seed for bootstrap.
+
+    Returns:
+        Dict with test statistics.
+    """
+    import scipy.stats as stats
+
+    result = {}
+    n = min(len(values_a), len(values_b))
+    if n < 2:
+        result["wilcoxon"] = {"p_value": float("nan"), "z_score": float("nan")}
+        result["bootstrap_ci"] = {"diff_mean": float("nan"), "ci_low": float("nan"), "ci_high": float("nan")}
+        return result
+
+    a = values_a[:n]
+    b = values_b[:n]
+    diff = [ai - bi for ai, bi in zip(a, b)]
+
+    # Wilcoxon signed-rank test
+    wilcoxon_result = stats.wilcoxon(a, b)
+    result["wilcoxon"] = {
+        "p_value": float(wilcoxon_result.pvalue),
+        "z_score": float(wilcoxon_result.statistic) if hasattr(wilcoxon_result, "statistic") else None,
+        "n_pairs": n,
+    }
+
+    # Mean difference
+    mean_diff = float(sum(diff) / len(diff))
+    result["bootstrap_ci"] = {
+        "diff_mean": mean_diff,
+    }
+
+    # Bootstrap CI 95%
+    n_boot = 5000
+    rng = __import__("numpy").random.default_rng(seed)
+    boot_diffs = rng.choice(diff, size=(n_boot, n)).mean(axis=1)
+    ci_low = float(__import__("numpy").quantile(boot_diffs, 0.025))
+    ci_high = float(__import__("numpy").quantile(boot_diffs, 0.975))
+    result["bootstrap_ci"]["ci_low"] = ci_low
+    result["bootstrap_ci"]["ci_high"] = ci_high
+    result["bootstrap_ci"]["n_bootstraps"] = n_boot
+
+    # Also compute mean/std for each method
+    result["method_a"] = {"mean": float(sum(a) / len(a)), "std": float(__import__("numpy").std(a)), "n": len(a)}
+    result["method_b"] = {"mean": float(sum(b) / len(b)), "std": float(__import__("numpy").std(b)), "n": len(b)}
+
+    return result
+
+
+def compute_wilcoxon_vs_chance_table(seed_acc_dict: dict[str, list[float]], chance: float = 0.5, seed: int = 42) -> dict:
+    """Compute Wilcoxon signed-rank test against chance level for each representation.
+
+    Args:
+        seed_acc_dict: Dict mapping representation name -> list of seed accuracies.
+        chance: Chance level (default 0.5 for binary classification).
+        seed: Random seed for bootstrap.
+
+    Returns:
+        Dict with test results per representation.
+    """
+    import scipy.stats as stats
+
+    results = {}
+    for name, accs in seed_acc_dict.items():
+        n = len(accs)
+        if n < 2:
+            results[name] = {"n": n, "wilcoxon_p": float("nan"), "z_score": float("nan")}
+            continue
+
+        # Test against chance level
+        wilcoxon_result = stats.wilcoxon([a - chance for a in accs])
+        mean_acc = float(sum(accs) / n)
+        std_acc = float(__import__("numpy").std(accs))
+
+        # Bootstrap CI for mean accuracy
+        rng = __import__("numpy").random.default_rng(seed)
+        boot_means = rng.choice(accs, size=(5000, n)).mean(axis=1)
+        ci_low = float(__import__("numpy").quantile(boot_means, 0.025))
+        ci_high = float(__import__("numpy").quantile(boot_means, 0.975))
+
+        results[name] = {
+            "n": n,
+            "accuracy_mean": mean_acc,
+            "accuracy_std": std_acc,
+            "wilcoxon_p": float(wilcoxon_result.pvalue),
+            "z_score": float(wilcoxon_result.statistic) if hasattr(wilcoxon_result, "statistic") else None,
+            "ci_95_low": ci_low,
+            "ci_95_high": ci_high,
+        }
+    return results
+
+
+def build_n_curve_table(n_grid_results: dict) -> dict:
+    """Build accuracy vs n data from n_grid_results.
+
+    Args:
+        n_grid_results: Dict mapping n -> {feature_name -> result} for a single seed.
+
+    Returns:
+        Dict mapping (task, seed) -> {n -> {feature -> acc}}.
+    """
+    curve = {}
+    for feat_name, feat_data in n_grid_results.items():
+        if feat_name == "task" or feat_name == "seed":
+            continue
+        obs = feat_data.get("observed", {})
+        for kernel in ("linear", "rbf"):
+            acc = obs.get(kernel, {}).get("accuracy_mean")
+            if acc is not None:
+                curve[(feat_name, kernel)] = acc
+    return curve
+
+
+def build_all_n_curves(reports: list[dict]) -> dict:
+    """Extract accuracy vs n curves across all tasks, seeds, and features."""
+    # Structure: {task -> feature -> kernel -> seed -> n -> acc}
+    curves: dict[str, dict[str, dict[str, dict[int, dict[int, float]]]]] = {}
+
+    for report in reports:
+        task = report.get("task", "unknown")
+        seed = report.get("seed", 0)
+        n_results = report.get("n_grid_results", {})
+
+        for n, feat_dict in n_results.items():
+            for feat_name, feat_data in feat_dict.items():
+                if feat_name in ("task", "seed", "ablation_results"):
+                    continue
+                obs = feat_data.get("observed", {})
+                for kernel in ("linear", "rbf"):
+                    acc = obs.get(kernel, {}).get("accuracy_mean")
+                    if acc is None:
+                        continue
+
+                    curves.setdefault(task, {}).setdefault(feat_name, {}).setdefault(kernel, {}).setdefault(seed, {})[n] = acc
+
+    return curves
+
+
+def aggregate_n_curves(curves: dict) -> dict:
+    """Aggregate n-curve data: for each (task, feature, kernel), compute mean/std across seeds at each n."""
+    aggregated: dict[str, dict[str, dict[str, dict[int, tuple[float, float]]]]] = {}
+
+    for task, feat_dict in curves.items():
+        for feat_name, kernel_dict in feat_dict.items():
+            for kernel, seed_dict in kernel_dict.items():
+                # Group by n
+                n_to_accs: dict[int, list[float]] = {}
+                for seed, n_dict in seed_dict.items():
+                    for n, acc in n_dict.items():
+                        n_to_accs.setdefault(n, []).append(acc)
+
+                for n, accs in n_to_accs.items():
+                    if not accs:
+                        continue
+                    mean = float(sum(accs) / len(accs))
+                    std = float(__import__("numpy").std(accs)) if len(accs) > 1 else 0.0
+                    aggregated.setdefault(task, {}).setdefault(feat_name, {}).setdefault(kernel, {})[n] = (mean, std)
+
+    return aggregated
+
+
+def build_k_ablation_table(reports: list[dict]) -> dict:
+    """Extract k ablation results."""
+    results = {}
+    for report in reports:
+        task = report.get("task", "unknown")
+        seed = report.get("seed", 0)
+        ablations = report.get("ablation_results", {})
+        k_data = ablations.get("k_ablation", {})
+        for feat_name, data in k_data.items():
+            acc = data.get("acc_linear")
+            if acc is not None:
+                key = f"{task}_seed{seed}_{feat_name}"
+                results[key] = {"k": data["k"], "acc_linear": acc, "acc_rbf": data.get("acc_rbf"), "seed": seed, "task": task}
+    return results
+
+
+def build_wl_depth_table(reports: list[dict]) -> dict:
+    """Extract WL depth ablation results."""
+    results = {}
+    for report in reports:
+        task = report.get("task", "unknown")
+        seed = report.get("seed", 0)
+        ablations = report.get("ablation_results", {})
+        wl_data = ablations.get("wl_depth_ablation", {})
+        for feat_name, data in wl_data.items():
+            acc = data.get("acc_linear")
+            if acc is not None:
+                key = f"{task}_seed{seed}_{feat_name}"
+                results[key] = {"depth": data["depth"], "acc_linear": acc, "acc_rbf": data.get("acc_rbf"), "seed": seed, "task": task}
+    return results
+
+
+def build_direction_ablation_table(reports: list[dict]) -> dict:
+    """Extract direction constraint ablation results."""
+    results = {}
+    for report in reports:
+        task = report.get("task", "unknown")
+        seed = report.get("seed", 0)
+        ablations = report.get("ablation_results", {})
+        dir_data = ablations.get("direction_ablation", {})
+        for feat_name, data in dir_data.items():
+            acc = data.get("acc_linear")
+            if acc is not None:
+                key = f"{task}_seed{seed}_{feat_name}"
+                results[key] = {"enforce_direction": data["enforce_direction"], "acc_linear": acc, "acc_rbf": data.get("acc_rbf"), "seed": seed, "task": task}
+    return results
+
+
+def build_dim_control_table(reports: list[dict]) -> dict:
+    """Extract dimensionality control results (PCA vs RP vs spectral)."""
+    results = {}
+    for report in reports:
+        task = report.get("task", "unknown")
+        seed = report.get("seed", 0)
+        n_results = report.get("n_grid_results", {})
+        for n, feat_dict in n_results.items():
+            for feat_name in ("fixed_layout_signed_pca96", "fixed_layout_signed_rp96", "fixed_layout_signed"):
+                if feat_name not in feat_dict:
+                    continue
+                data = feat_dict[feat_name]
+                obs = data.get("observed", {})
+                acc_lin = obs.get("linear", {}).get("accuracy_mean")
+                acc_rbf = obs.get("rbf", {}).get("accuracy_mean")
+                if acc_lin is not None:
+                    key = f"{task}_seed{seed}_{n}_{feat_name}"
+                    results[key] = {
+                        "n": n,
+                        "feature": feat_name,
+                        "acc_linear": acc_lin,
+                        "acc_rbf": acc_rbf,
+                        "seed": seed,
+                        "task": task,
+                    }
+    return results
+
+
+def build_n_curve_latex(aggregated: dict, task: str = "ioi") -> str:
+    """Build LaTeX table for accuracy vs n learning curve."""
+    lines = []
+    lines.append("\\begin{table}[h]")
+    lines.append("\\centering")
+    lines.append("\\caption{Accuracy vs number of prompt pairs ($n$).}")
+    lines.append("\\begin{tabular}{l" + "ccc" * 3 + "}")
+    lines.append("\\hline")
+    lines.append("\\textbf{n} & \\multicolumn{2}{c}{\\textbf{Fixed layout}} & \\multicolumn{2}{c}{\\textbf{WL bootstrap}} & \\multicolumn{2}{c}{\\textbf{Patch-effect}} \\\\")
+    lines.append("\\textbf{} & \\textbf{acc} & \\textbf{std} & \\textbf{acc} & \\textbf{std} & \\textbf{acc} & \\textbf{std} \\\\ \\hline")
+
+    # Find common n values
+    feat_names = list(aggregated.get(task, {}).keys())
+    if not feat_names:
+        return lines
+
+    all_ns = set()
+    for feat in feat_names:
+        for n in aggregated[task].get(feat, {}).get("linear", {}).keys():
+            all_ns.add(n)
+
+    for n in sorted(all_ns):
+        row_parts = [f"\\textbf{{{n}}}]"]
+        for feat in ["fixed_layout_signed", "wl_bootstrap", "patch_effect_node_vector"]:
+            lin_data = aggregated.get(task, {}).get(feat, {}).get("linear", {}).get(n)
+            if lin_data:
+                mean, std = lin_data
+                row_parts.append(f"{mean:.4f} & {std:.4f}")
+            else:
+                row_parts.append("-- & --")
+        lines.append(" & ".join(row_parts) + " \\\\")
+
+    lines.append("\\hline")
+    lines.append("\\end{tabular}")
+    lines.append("\\end{table}")
+    return "\n".join(lines)
+
+
+def build_k_ablation_latex(k_results: dict) -> str:
+    """Build LaTeX table for k ablation."""
+    lines = []
+    lines.append("\\begin{table}[h]")
+    lines.append("\\centering")
+    lines.append("\\caption{k ablation results (accuracy vs k).}")
+    lines.append("\\begin{tabular}{lcc}")
+    lines.append("\\hline")
+    lines.append("\\textbf{k} & \\textbf{acc (linear)} & \\textbf{acc (rbf)} \\\\ \\hline")
+    for key, data in sorted(k_results.items(), key=lambda x: x[1]["k"]):
+        lines.append(f"{data['k']} & {data['acc_linear']:.4f} & {data.get('acc_rbf') or 0:.4f} \\\\")
+    lines.append("\\hline")
+    lines.append("\\end{tabular}")
+    lines.append("\\end{table}")
+    return "\n".join(lines)
+
+
+def build_wl_depth_latex(wl_results: dict) -> str:
+    """Build LaTeX table for WL depth ablation."""
+    lines = []
+    lines.append("\\begin{table}[h]")
+    lines.append("\\centering")
+    lines.append("\\caption{WL depth ablation results (accuracy vs WL depth).}")
+    lines.append("\\begin{tabular}{lcc}")
+    lines.append("\\hline")
+    lines.append("\\textbf{depth} & \\textbf{acc (linear)} & \\textbf{acc (rbf)} \\\\ \\hline")
+    for key, data in sorted(wl_results.items(), key=lambda x: x[1]["depth"]):
+        lines.append(f"{data['depth']} & {data['acc_linear']:.4f} & {data.get('acc_rbf') or 0:.4f} \\\\")
+    lines.append("\\hline")
+    lines.append("\\end{tabular}")
+    lines.append("\\end{table}")
+    return "\n".join(lines)
+
+
+def build_direction_ablation_latex(dir_results: dict) -> str:
+    """Build LaTeX table for direction constraint ablation."""
+    lines = []
+    lines.append("\\begin{table}[h]")
+    lines.append("\\centering")
+    lines.append("\\caption{Direction constraint ablation results.}")
+    lines.append("\\begin{tabular}{lcc}")
+    lines.append("\\hline")
+    lines.append("\\textbf{direction} & \\textbf{acc (linear)} & \\textbf{acc (rbf)} \\\\ \\hline")
+    for key, data in sorted(dir_results.items(), key=lambda x: x[1]["enforce_direction"], reverse=True):
+        lines.append(f"{'enforced' if data['enforce_direction'] else 'free'} & {data['acc_linear']:.4f} & {data.get('acc_rbf') or 0:.4f} \\\\")
+    lines.append("\\hline")
+    lines.append("\\end{tabular}")
+    lines.append("\\end{table}")
+    return "\n".join(lines)
+
+
+def build_dim_control_latex(dim_results: dict) -> str:
+    """Build LaTeX table for dimensionality control (PCA vs RP)."""
+    lines = []
+    lines.append("\\begin{table}[h]")
+    lines.append("\\centering")
+    lines.append("\\caption{Dimensionality control: PCA vs Random Projection (96 dims).}")
+    lines.append("\\begin{tabular}{lccc}")
+    lines.append("\\hline")
+    lines.append("\\textbf{feature} & \\textbf{acc (linear)} & \\textbf{acc (rbf)} & \\textbf{dim} \\\\ \\hline")
+
+    # Group by feature
+    feat_groups: dict[str, list] = {}
+    for key, data in dim_results.items():
+        feat_groups.setdefault(data["feature"], []).append(data)
+
+    for feat in ["fixed_layout_signed", "fixed_layout_signed_pca96", "fixed_layout_signed_rp96"]:
+        if feat not in feat_groups:
+            continue
+        accs_lin = [d["acc_linear"] for d in feat_groups[feat] if d["acc_linear"] is not None]
+        accs_rbf = [d["acc_rbf"] for d in feat_groups[feat] if d["acc_rbf"] is not None]
+        mean_lin = float(sum(accs_lin) / len(accs_lin)) if accs_lin else 0
+        std_lin = float(__import__("numpy").std(accs_lin)) if len(accs_lin) > 1 else 0
+        mean_rbf = float(sum(accs_rbf) / len(accs_rbf)) if accs_rbf else 0
+        std_rbf = float(__import__("numpy").std(accs_rbf)) if len(accs_rbf) > 1 else 0
+
+        dim_label = "14,280" if feat == "fixed_layout_signed" else "96"
+        lines.append(f"{feat} & {mean_lin:.4f} & {mean_rbf:.4f} & {dim_label} \\\\")
+
+    lines.append("\\hline")
+    lines.append("\\end{tabular}")
+    lines.append("\\end{table}")
+    return "\n".join(lines)
+
+
+def build_statistical_tests_latex(test_results: dict) -> str:
+    """Build LaTeX table for statistical tests."""
+    lines = []
+    lines.append("\\begin{table}[h]")
+    lines.append("\\centering")
+    lines.append("\\caption{Statistical tests: Wilcoxon signed-rank and bootstrap CI (95\\%).}")
+    lines.append("\\begin{tabular}{lcccccc}")
+    lines.append("\\hline")
+    lines.append("\\textbf{comparison} & \\textbf{$\\Delta$} & \\textbf{CI$_{low}$} & \\textbf{CI$_{high}$} & \\textbf{p-value} & \\textbf{n} \\\\ \\hline")
+
+    for name, test in test_results.items():
+        wilcoxon = test.get("wilcoxon", {})
+        ci = test.get("bootstrap_ci", {})
+        p_val = wilcoxon.get("p_value", float("nan"))
+        delta = ci.get("diff_mean", float("nan"))
+        ci_low = ci.get("ci_low", float("nan"))
+        ci_high = ci.get("ci_high", float("nan"))
+        n_pairs = wilcoxon.get("n_pairs", 0)
+
+        p_str = f"{p_val:.4f}" if not (isinstance(p_val, float) and (p_val != p_val)) else "--"
+        delta_str = f"{delta:.4f}" if not (isinstance(delta, float) and (delta != delta)) else "--"
+        ci_low_str = f"{ci_low:.4f}" if not (isinstance(ci_low, float) and (ci_low != ci_low)) else "--"
+        ci_high_str = f"{ci_high:.4f}" if not (isinstance(ci_high, float) and (ci_high != ci_high)) else "--"
+
+        pair_name = name.replace("_vs_", " vs ")
+        lines.append(f"{pair_name} & {delta_str} & {ci_low_str} & {ci_high_str} & {p_str} & {n_pairs} \\\\")
+
+    lines.append("\\hline")
+    lines.append("\\end{tabular}")
+    lines.append("\\end{table}")
+    return "\n".join(lines)
+
+
+def load_revision_results(input_dir: str) -> dict:
+    """Load revision results from runs/ directory.
+
+    Args:
+        input_dir: Directory containing neurips_revision runs.
+
+    Returns:
+        Dict with tasks, seeds, and aggregated data.
+    """
+    input_path = Path(input_dir)
+    reports = []
+
+    # Load all JSON files from runs/
+    runs_dir = input_path / "runs"
+    if runs_dir.exists():
+        for json_file in sorted(runs_dir.glob("**/seed*.json")):
+            with json_file.open() as f:
+                reports.append(json.load(f))
+
+    # Also try loading from results.json
+    results_file = input_path / "results.json"
+    if results_file.exists():
+        with results_file.open() as f:
+            data = json.load(f)
+            if "runs" in data:
+                reports = data["runs"]
+
+    return {"reports": reports, "input_dir": str(input_path)}
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Build paper tables from results")
+    parser.add_argument("--input", "-i", nargs="*", help="Input results.json file(s) or directory")
+    parser.add_argument("--output-dir", "-o", default="outputs", help="Output directory")
+    parser.add_argument("--revision-mode", action="store_true", help="Enable NeurIPS revision mode with n-curve and ablation tables")
+    parser.add_argument("--task", default=None, help="Specific task to build tables for")
+    args = parser.parse_args()
+
+    input_paths = args.input or ["outputs/classical_publication"]
+    all_tables = {"main": [], "scalable": [], "null_controls": [], "causal": []}
+
+    for p in input_paths:
+        path = Path(p)
+        if path.is_dir():
+            for json_file in sorted(path.glob("**/results.json")):
+                tables = build_tables_from_results(str(json_file))
+                for key in all_tables:
+                    all_tables[key].extend(tables[key])
+        elif path.is_file():
+            tables = build_tables_from_results(str(path))
+            for key in all_tables:
+                all_tables[key].extend(tables[key])
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write standard LaTeX
+    latex = tables_to_latex(all_tables)
+    (output_dir / "paper_metrics_for_latex.tex").write_text(latex)
+
+    # Write standard markdown
+    md = tables_to_markdown(all_tables)
+    (output_dir / "paper_metrics_summary.json").write_text(json.dumps(md, indent=2))
+
+    # Write standard markdown table
+    md_lines = ["# Paper Metrics Tables\n\n"]
+    md_lines.append("## Main Table\n\n")
+    md_lines.append("| Representation | Acc | Std | Dim | Seeds | CI$_{95}$ |\n")
+    md_lines.append("| --- | --- | --- | --- | --- | --- |\n")
+    for r in all_tables["main"]:
+        ci = f"[{r['ci_low']:.4f}, {r['ci_high']:.4f}]" if not math.isnan(r['ci_low']) else "N/A"
+        md_lines.append(
+            f"| {tex_escape(r['representation'])} ($n={r['n']}$) | {r['accuracy_mean']:.4f} | {r['accuracy_std']:.4f} | {r['dim']} | {r['n_seeds']} | {ci} |\n"
+        )
+
+    (output_dir / "paper_metrics_tables_toy.md").write_text("".join(md_lines))
+
+    print(f"Written to {output_dir}:")
+    print(f"  - paper_metrics_for_latex.tex ({len(all_tables['main'])} main rows)")
+    print(f"  - paper_metrics_summary.json (structured)")
+    print(f"  - paper_metrics_tables_toy.md (markdown)")
+
+    # ---- Revision mode ----
+    if args.revision_mode:
+        print("\n=== Revision Mode ===")
+
+        # Load revision results
+        rev_data = load_revision_results(str(Path(input_paths[0]) if input_paths else "outputs/neurips_revision"))
+        reports = rev_data["reports"]
+        input_dir = rev_data["input_dir"]
+
+        if not reports:
+            print("No revision reports found.")
+        else:
+            # Filter by task if specified
+            if args.task:
+                reports = [r for r in reports if r.get("task") == args.task]
+                print(f"Filtered to task: {args.task} ({len(reports)} reports)")
+
+            print(f"Total revision reports: {len(reports)}")
+
+            # ---- n-curve data ----
+            print("\nBuilding n-curve data...")
+            curves = build_all_n_curves(reports)
+            aggregated = aggregate_n_curves(curves)
+
+            # Save n-curve JSON
+            n_curve_data = {}
+            for task, feat_dict in aggregated.items():
+                for feat_name, kernel_dict in feat_dict.items():
+                    for kernel, n_dict in kernel_dict.items():
+                        n_curve_data.setdefault(task, {}).setdefault(feat_name, {}).setdefault(kernel, {})
+                        for n, (mean, std) in n_dict.items():
+                            n_curve_data[task][feat_name][kernel][n] = {"mean": mean, "std": std}
+
+            n_curve_path = output_dir / "n_curve_data.json"
+            n_curve_path.write_text(json.dumps(n_curve_data, indent=2))
+            print(f"  Saved n-curve data to {n_curve_path}")
+
+            # ---- Statistical tests ----
+            print("Computing statistical tests...")
+            stat_tests = {}
+
+            # Compare fixed_layout_signed vs chance (0.5) for each task
+            for task, feat_dict in curves.items():
+                fixed_layout_data = feat_dict.get("fixed_layout_signed", {})
+                if "linear" in fixed_layout_data:
+                    # Collect all seed accuracies
+                    all_accs = []
+                    for seed_accs in fixed_layout_data["linear"].values():
+                        all_accs.extend(seed_accs.values())
+                    if all_accs:
+                        test = compute_wilcoxon_vs_chance_table({f"{task}_fixed_layout": all_accs}, chance=0.5)
+                        stat_tests[f"{task}_fixed_layout_vs_chance"] = test[f"{task}_fixed_layout"]
+
+            # Compare PCA vs RP for each task
+            for task, feat_dict in curves.items():
+                pca_data = feat_dict.get("fixed_layout_signed_pca96", {})
+                rp_data = feat_dict.get("fixed_layout_signed_rp96", {})
+                if "linear" in pca_data and "linear" in rp_data:
+                    # Match by seed
+                    common_seeds = set(pca_data["linear"].keys()) & set(rp_data["linear"].keys())
+                    pca_accs = []
+                    rp_accs = []
+                    for seed in sorted(common_seeds):
+                        pca_accs.append(pca_data["linear"][seed])
+                        rp_accs.append(rp_data["linear"][seed])
+                    if pca_accs and rp_accs:
+                        test = compute_statistical_tests(pca_accs, rp_accs)
+                        stat_tests[f"{task}_pca96_vs_rp96"] = test
+
+            stat_tests_path = output_dir / "statistical_tests.json"
+            stat_tests_path.write_text(json.dumps(stat_tests, indent=2))
+            print(f"  Saved statistical tests to {stat_tests_path}")
+
+            # ---- Ablation tables ----
+            print("Building ablation tables...")
+            k_results = build_k_ablation_table(reports)
+            wl_results = build_wl_depth_table(reports)
+            dir_results = build_direction_ablation_table(reports)
+            dim_results = build_dim_control_table(reports)
+
+            # Save ablation JSONs
+            (output_dir / "k_ablation_data.json").write_text(json.dumps(k_results, indent=2))
+            (output_dir / "wl_depth_data.json").write_text(json.dumps(wl_results, indent=2))
+            (output_dir / "direction_ablation_data.json").write_text(json.dumps(dir_results, indent=2))
+            (output_dir / "dim_control_data.json").write_text(json.dumps(dim_results, indent=2))
+
+            # ---- Write LaTeX tables ----
+            # N-curve LaTeX
+            for task in aggregated:
+                latex = build_n_curve_latex(aggregated, task)
+                (output_dir / f"n_curve_latex_{task}.tex").write_text(latex)
+                print(f"  Saved n-curve LaTeX for {task}")
+
+            # K ablation LaTeX
+            if k_results:
+                latex = build_k_ablation_latex(k_results)
+                (output_dir / "k_ablation_latex.tex").write_text(latex)
+                print("  Saved k ablation LaTeX")
+
+            # WL depth LaTeX
+            if wl_results:
+                latex = build_wl_depth_latex(wl_results)
+                (output_dir / "wl_depth_latex.tex").write_text(latex)
+                print("  Saved WL depth LaTeX")
+
+            # Direction ablation LaTeX
+            if dir_results:
+                latex = build_direction_ablation_latex(dir_results)
+                (output_dir / "direction_ablation_latex.tex").write_text(latex)
+                print("  Saved direction ablation LaTeX")
+
+            # Dim control LaTeX
+            if dim_results:
+                latex = build_dim_control_latex(dim_results)
+                (output_dir / "dim_control_latex.tex").write_text(latex)
+                print("  Saved dim control LaTeX")
+
+            # Statistical tests LaTeX
+            if stat_tests:
+                latex = build_statistical_tests_latex(stat_tests)
+                (output_dir / "statistical_tests_latex.tex").write_text(latex)
+                print("  Saved statistical tests LaTeX")
+
+        print("\nRevision mode complete.")
+
+
+if __name__ == "__main__":
+    main()
