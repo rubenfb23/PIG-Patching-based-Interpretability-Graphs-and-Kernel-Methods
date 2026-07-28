@@ -232,4 +232,32 @@ web/tsconfig.tsbuildinfo
 *.html
 *.pid
 *.pdf
-*.tex
+
+# Generated research data and experiment outputs
+/data/
+/outputs/
+
+# Generated document binaries and bundles
+*.docx
+/docs/**/*.zip
+/docs/**/supplement/source/
+*.bak
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.bcf
+*.fdb_latexmk
+*.fls
+*.lof
+*.lot
+*.nav
+*.out
+*.run.xml
+*.snm
+*.synctex
+*.synctex.gz
+*.toc
+*.vrb
+*.xdv
